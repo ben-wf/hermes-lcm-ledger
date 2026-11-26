@@ -11,7 +11,7 @@ The authoritative, versioned contract is
 `1.0.4` supports:
 
 - Hermes Agent `>=0.23.4,<1`
-- Python 3.11, 3.12, 3.13, and 3.14 (the CI matrix)
+- Python 3.14 on Linux and macOS (the CI matrix)
 - the required `agent` host API
 - explicitly listed compatibility-path and optional feature imports, with the
   imported API each host-resolved version must provide

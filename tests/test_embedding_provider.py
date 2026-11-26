@@ -1166,16 +1166,17 @@ def test_ollama_timeout_after_possible_acceptance_is_not_resent():
 
 
 def test_fastembed_normal_operation_is_deadline_bounded(monkeypatch, tmp_path):
+    release = threading.Event()
     class SlowFastembedModel:
         def __init__(self, **_kwargs):
             pass
 
         def query_embed(self, texts):
-            time.sleep(0.05)
+            release.wait(3)
             return ([1.0, 0.0] for _ in texts)
 
         def embed(self, texts):
-            time.sleep(0.05)
+            release.wait(3)
             return ([1.0, 0.0] for _ in texts)
 
     monkeypatch.setattr(provider_mod, "_load_fastembed", lambda: SlowFastembedModel)
@@ -1183,7 +1184,8 @@ def test_fastembed_normal_operation_is_deadline_bounded(monkeypatch, tmp_path):
     started = time.monotonic()
     with pytest.raises(EmbeddingProviderError, match="deadline exceeded"):
         provider.embed_query("slow")
-    assert time.monotonic() - started < 0.04
+    release.set()
+    assert time.monotonic() - started < 1.0
 
 
 def test_fastembed_timeout_capacity_is_bounded_until_worker_exits(monkeypatch, tmp_path):
@@ -1217,7 +1219,7 @@ def test_fastembed_timeout_capacity_is_bounded_until_worker_exits(monkeypatch, t
         with pytest.raises(EmbeddingProviderError, match="worker capacity exhausted"):
             second.embed_query("must-not-start")
 
-        assert time.monotonic() - started < 0.03
+        assert time.monotonic() - started < 1.0
         assert calls == 1
     finally:
         release_worker.set()

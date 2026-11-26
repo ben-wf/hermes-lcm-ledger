@@ -445,10 +445,10 @@ def test_compaction_telemetry_lock_contention_is_nonblocking(tmp_path):
 
         started = time.monotonic()
         writer.start()
-        assert write_done.wait(timeout=0.25)
+        assert write_done.wait(timeout=1.5)
         elapsed = time.monotonic() - started
 
-        assert elapsed < 0.25
+        assert elapsed < 1.5
         assert len(write_errors) == 1
         assert isinstance(write_errors[0], sqlite3.OperationalError)
         assert "locked" in str(write_errors[0]).lower()

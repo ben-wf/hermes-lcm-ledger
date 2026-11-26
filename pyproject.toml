@@ -14,12 +14,12 @@
 [project]
 name = "hermes-lcm-ledger"
 version = "0.1.0rc1"
-requires-python = ">=3.11"
+requires-python = ">=3.14,<3.15"
 dependencies = []
 
 [tool.ruff]
-# Match the oldest runtime CI exercises; keeps lint aligned with the 3.11 leg.
-target-version = "py311"
+# Match the oldest runtime CI exercises; keeps lint aligned with the 3.14 runtime.
+target-version = "py314"
 
 [tool.ruff.lint]
 # Ruff's default rule set: pyflakes (F) plus a focused pycodestyle subset

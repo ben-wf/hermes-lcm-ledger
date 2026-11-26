@@ -116,7 +116,7 @@ claim that Hermes core has no persisted record of pre-compression history.
 ### Prerequisites
 
 - Hermes Agent 0.23.4 or later in the 0.x series
-- Python 3.11+
+- Python 3.14
 - No required third-party runtime dependencies
 
 `tiktoken` is used if available; otherwise LCM falls back to character-based

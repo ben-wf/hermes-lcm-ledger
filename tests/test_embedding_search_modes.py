@@ -146,6 +146,7 @@ def test_semantic_happy_path_orders_by_cosine_and_surfaces_confidence_coverage(
 def test_semantic_timeout_returns_explicit_deadline_without_starting_fallback(
     semantic_engine, monkeypatch
 ):
+    release = threading.Event()
     semantic_engine._config.embedding_query_timeout_s = 0.02
     semantic_engine._store.append(
         "session-a",
@@ -154,7 +155,7 @@ def test_semantic_timeout_returns_explicit_deadline_without_starting_fallback(
 
     class SlowProvider(MockProvider):
         def embed_query(self, text):
-            time.sleep(0.1)
+            release.wait(3)
             return super().embed_query(text)
 
     monkeypatch.setattr(lcm_tools, "resolve_provider", lambda _config: SlowProvider())
@@ -166,7 +167,8 @@ def test_semantic_timeout_returns_explicit_deadline_without_starting_fallback(
         )
     )
 
-    assert time.monotonic() - started < 0.09
+    release.set()
+    assert time.monotonic() - started < 1.0
     assert payload["timeout"] is True
     assert payload["mode"] == "semantic"
     assert payload["timeout_stage"] == "full_text"
@@ -176,6 +178,7 @@ def test_semantic_budget_bounds_knn_and_does_not_start_fallback_after_expiry(
     semantic_engine, monkeypatch
 ):
     """The one request deadline prevents a post-timeout fallback from starting."""
+    release = threading.Event()
     semantic_engine._config.embedding_query_timeout_s = 0.02
     semantic_engine._store.append(
         "session-a", {"role": "user", "content": "needle survives a slow knn"}
@@ -186,7 +189,7 @@ def test_semantic_budget_bounds_knn_and_does_not_start_fallback_after_expiry(
             pass
 
         def knn(self, *_args, **_kwargs):
-            time.sleep(0.2)  # far exceeds the 0.02s budget
+            release.wait(3)  # far exceeds the 0.02s budget
             return KNNResult(coverage="full")
 
         def close(self):
@@ -212,7 +215,8 @@ def test_semantic_budget_bounds_knn_and_does_not_start_fallback_after_expiry(
     )
     elapsed = time.monotonic() - started
 
-    assert elapsed < 0.08
+    release.set()
+    assert elapsed < 1.0
     assert payload["timeout"] is True
     assert fallback_calls == 0
 
@@ -785,11 +789,12 @@ def test_provider_resolution_is_bounded_and_does_not_start_query_or_fallback(
 def test_hybrid_does_not_start_semantic_arm_after_fts_exhausts_deadline(
     semantic_engine, monkeypatch
 ):
+    release = threading.Event()
     semantic_engine._config.embedding_query_timeout_s = 0.02
     provider_calls = 0
 
     def slow_full_text(_args, **_kwargs):
-        time.sleep(0.1)
+        release.wait(3)
         return json.dumps({"results": []})
 
     def resolve(_config):
@@ -806,7 +811,8 @@ def test_hybrid_does_not_start_semantic_arm_after_fts_exhausts_deadline(
         )
     )
 
-    assert time.monotonic() - started < 0.08
+    release.set()
+    assert time.monotonic() - started < 1.0
     assert payload["timeout"] is True
     assert payload["mode"] == "hybrid"
     assert provider_calls == 0

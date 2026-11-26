@@ -11,9 +11,6 @@
   },
   "supported_versions": {
     "python": [
-      "3.11",
-      "3.12",
-      "3.13",
       "3.14"
     ],
     "hermes_agent": ">=0.23.4,<1",

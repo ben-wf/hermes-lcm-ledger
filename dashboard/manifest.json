@@ -1,0 +1,8 @@
+{
+  "name": "hermes-lcm-ledger",
+  "label": "LCM Ledger",
+  "api": "plugin_api.py",
+  "tab": {
+    "hidden": true
+  }
+}

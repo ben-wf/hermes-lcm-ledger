@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "contract_version": "1.0.5",
+  "contract_version": "1.0.6",
   "boundary": "host-owned",
   "imported_api_validation": "observed-coverage-only",
   "description": "Hermes-LCM is a source-installed Hermes Agent plugin. Hermes Agent owns the Python environment and dependency resolution; the plugin declares the host and optional feature imports it consumes without creating a second package installer or lock.",
@@ -20,7 +20,8 @@
     "globs": [
       "*.py",
       "benchmarking/**/*.py",
-      "scripts/**/*.py"
+      "scripts/**/*.py",
+      "dashboard/*.py"
     ],
     "local_imports": [
       "hermes_lcm",
@@ -68,10 +69,14 @@
       "version_policy": "Hermes Agent >=0.23.4,<1; each compatibility path has an explicit fallback",
       "imported_api": [
         "hermes_cli.auth.PROVIDER_REGISTRY",
+        "hermes_cli.config.get_env_value",
         "hermes_cli.config.get_hermes_home",
         "hermes_cli.config.load_config_readonly",
         "hermes_cli.plugins.get_plugin_manager",
-        "hermes_cli.runtime_provider._get_named_custom_provider"
+        "hermes_cli.runtime_provider._get_named_custom_provider",
+        "hermes_cli.plugins_settings.plugin_settings_fields",
+        "hermes_cli.profiles.current_profile_name",
+        "hermes_cli.web_server._require_token"
       ]
     },
     "huggingface_hub": {
@@ -128,6 +133,17 @@
       "imported_api": [
         "yaml.safe_load",
         "yaml.safe_dump"
+      ]
+    },
+    "fastapi": {
+      "distribution": "fastapi",
+      "availability": "optional",
+      "scope": "Desktop settings API",
+      "version_policy": "Hermes dashboard environment",
+      "imported_api": [
+        "fastapi.APIRouter",
+        "fastapi.Request",
+        "fastapi.Response"
       ]
     }
   },

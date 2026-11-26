@@ -20,6 +20,8 @@ import time
 from contextlib import contextmanager
 from typing import Iterable, Sequence
 
+from .config import DEFAULT_INTEGRITY_CHECK_INTERVAL_HOURS as DEFAULT_INTEGRITY_CHECK_INTERVAL_HOURS
+
 logger = logging.getLogger(__name__)
 
 
@@ -2472,33 +2474,11 @@ def _fts_needs_rebuild_structural(conn: sqlite3.Connection, spec: ExternalConten
     return False
 
 
-INTEGRITY_CHECK_INTERVAL_ENV = "LCM_FTS_INTEGRITY_CHECK_INTERVAL_HOURS"
-DEFAULT_INTEGRITY_CHECK_INTERVAL_HOURS = 24.0
-
-
 def _integrity_check_interval_hours() -> float:
-    """Hours between startup FTS deep integrity-checks.
+    from .config import _ledger_settings, integrity_interval_setting
 
-    ``0`` checks on every startup (previous behavior); a negative value never
-    checks on startup (relies on structural checks + LIKE fallback + doctor).
-    """
-    from .config import _ledger_settings
-
-    setting = _ledger_settings().get("fts_integrity_check_interval_hours")
-    if type(setting) in (float, int) and math.isfinite(setting):
-        return float(setting)
-    raw = os.environ.get(INTEGRITY_CHECK_INTERVAL_ENV)
-    if raw is None:
-        return DEFAULT_INTEGRITY_CHECK_INTERVAL_HOURS
-    try:
-        value = float(raw)
-    except (TypeError, ValueError):
-        return DEFAULT_INTEGRITY_CHECK_INTERVAL_HOURS
-    if not math.isfinite(value):
-        # nan/inf would suppress startup checks indefinitely once a marker
-        # exists; treat non-finite values as invalid.
-        return DEFAULT_INTEGRITY_CHECK_INTERVAL_HOURS
-    return value
+    hours, _ = integrity_interval_setting(_ledger_settings())
+    return hours
 
 
 def _integrity_marker_key(spec: ExternalContentFtsSpec) -> str:

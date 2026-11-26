@@ -22,13 +22,6 @@ def get_recall_policy() -> str:
     return _get_recall_policy()
 
 
-def _env_flag_enabled(name: str, default: bool = False) -> bool:
-    value = os.environ.get(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
 def _make_wrapped_handler(tool_name: str, engine):
     """Route a registered lcm_* tool through the engine dispatch path."""
     def _wrapped(args: dict, **kwargs) -> str:
@@ -362,7 +355,7 @@ def _make_command_handler(handle_lcm_command, engine, resolve_active_lcm_engine)
 
 def register(ctx):
     """Plugin entry point — register the LCM context engine and tools."""
-    from .config import LCMConfig
+    from .config import LCMConfig, slash_command_setting
     from .engine import LCMEngine, resolve_active_lcm_engine
     from .schemas import (
         LCM_GREP,
@@ -530,9 +523,7 @@ def register(ctx):
     register_command = getattr(ctx, "register_command", None)
     get_config = getattr(ctx, "get_config", None)
     slash_setting = get_config("enable_slash_command", None) if callable(get_config) else None
-    slash_enabled = (
-        slash_setting if isinstance(slash_setting, bool) else _env_flag_enabled("LCM_ENABLE_SLASH_COMMAND")
-    )
+    slash_enabled, _ = slash_command_setting({"enable_slash_command": slash_setting})
     if callable(register_command) and slash_enabled:
         from .command import handle_lcm_command
 

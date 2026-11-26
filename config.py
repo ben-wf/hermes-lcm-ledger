@@ -68,40 +68,28 @@ def _parse_arm_weights(raw: str, defaults: dict[str, float]) -> dict[str, float]
     return weights
 
 
-def _parse_int_env(key: str, default: int) -> int:
-    raw = os.environ.get(key)
-    if raw is None:
-        return default
+def _profile_env(key: str) -> str | None:
     try:
-        return int(raw)
-    except (TypeError, ValueError):
-        return default
+        from hermes_cli.config import get_env_value
+    except ImportError:
+        return os.environ.get(key)
+    return get_env_value(key)
 
 
-def _parse_float_env(key: str, default: float) -> float:
-    raw = os.environ.get(key)
-    if raw is None:
-        return default
-    try:
-        return float(raw)
-    except (TypeError, ValueError):
-        return default
-
-
-def _parse_bool_env(key: str, default: bool) -> bool:
-    raw = os.environ.get(key)
-    if raw is None:
-        return default
-    normalized = raw.strip().lower()
-    if normalized in {"1", "true", "yes", "on"}:
+def _env_bool(raw: str) -> bool:
+    value = raw.strip().lower()
+    if value in {"1", "true", "yes", "on"}:
         return True
-    if normalized in {"0", "false", "no", "off"}:
+    if value in {"0", "false", "no", "off"}:
         return False
-    return default
+    raise ValueError("invalid boolean")
 
 
-def _parse_str_env(key: str, default):
-    return os.environ.get(key, default)
+def _env_float(raw: str) -> float:
+    value = float(raw)
+    if not math.isfinite(value):
+        raise ValueError("non-finite value")
+    return value
 
 
 def _parse_int_env_with_source(
@@ -110,7 +98,7 @@ def _parse_int_env_with_source(
     *,
     default_source: str = "default",
 ) -> tuple[int, str, str | None]:
-    raw = os.environ.get(key)
+    raw = _profile_env(key)
     if raw is None:
         return default, default_source, None
     try:
@@ -125,11 +113,11 @@ def _parse_float_env_with_source(
     *,
     default_source: str = "default",
 ) -> tuple[float, str, str | None]:
-    raw = os.environ.get(key)
+    raw = _profile_env(key)
     if raw is None:
         return default, default_source, None
     try:
-        return float(raw), f"env:{key}", None
+        return _env_float(raw), f"env:{key}", None
     except (TypeError, ValueError):
         return default, default_source, f"invalid env {key}={raw!r} ignored"
 
@@ -151,7 +139,12 @@ def _config_bool_disabled(value) -> bool:
 
 
 def _hermes_config_path() -> Path:
-    home = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
+    try:
+        from hermes_cli.config import get_hermes_home
+    except ImportError:
+        home = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
+    else:
+        home = get_hermes_home()
     return home / "config.yaml"
 
 
@@ -433,12 +426,7 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("rollup_maintenance_budget_ms", "LCM_ROLLUP_MAINTENANCE_BUDGET_MS", int),
 )
 
-_PARSER_BY_TYPE = {
-    int: _parse_int_env,
-    float: _parse_float_env,
-    bool: _parse_bool_env,
-    str: _parse_str_env,
-}
+_PARSER_BY_TYPE = {int: int, float: _env_float, bool: _env_bool, str: str}
 
 # Fields whose env reading needs provenance tracking or a computed default;
 # ``from_env`` handles these explicitly, so the uniform loop skips them.
@@ -868,44 +856,37 @@ class LCMConfig:
             if spec.name in _SOURCE_TRACKED_ENV_FIELDS:
                 continue
             parser = _PARSER_BY_TYPE[spec.py_type]
-            setattr(c, spec.name, parser(spec.env_key, getattr(c, spec.name)))
+            raw = _profile_env(spec.env_key)
+            if raw is not None:
+                try:
+                    value = parser(raw)
+                except ValueError:
+                    continue
+                setattr(c, spec.name, value)
+                _record(spec.name, f"env:{spec.env_key}")
 
         # Pattern-list overrides carry a source sidecar and stay explicit.
-        raw_sensitive_patterns = os.environ.get("LCM_SENSITIVE_PATTERNS")
-        if raw_sensitive_patterns is not None:
-            c.sensitive_patterns = _parse_pattern_list(raw_sensitive_patterns)
-            c.sensitive_patterns_source = "env"
-        raw_summary_fallback_models = os.environ.get("LCM_SUMMARY_FALLBACK_MODELS")
-        if raw_summary_fallback_models is not None:
-            c.summary_fallback_models = _parse_pattern_list(raw_summary_fallback_models)
+        for key in (*_PATTERN_SOURCE_FIELDS, "summary_fallback_models"):
+            env_key = f"LCM_{key.upper()}"
+            raw = _profile_env(env_key)
+            if raw is not None:
+                setattr(c, key, _parse_pattern_list(raw))
+                if key in _PATTERN_SOURCE_FIELDS:
+                    setattr(c, f"{key}_source", "env")
+                _record(key, f"env:{env_key}")
 
-        raw_max_age = os.environ.get("LCM_EMPTY_LIFECYCLE_GC_MAX_AGE_HOURS")
+        raw_max_age = _profile_env("LCM_EMPTY_LIFECYCLE_GC_MAX_AGE_HOURS")
         if raw_max_age is not None:
             try:
-                c.empty_lifecycle_gc_max_age_hours = float(raw_max_age)
-            except (TypeError, ValueError):
+                c.empty_lifecycle_gc_max_age_hours = _env_float(raw_max_age)
+                _record("empty_lifecycle_gc_max_age_hours", "env:LCM_EMPTY_LIFECYCLE_GC_MAX_AGE_HOURS")
+            except ValueError:
                 pass
 
-        raw_arm_weights = os.environ.get("LCM_RECALL_ARM_WEIGHTS")
-        if raw_arm_weights is not None:
-            c.recall_arm_weights = _parse_arm_weights(
-                raw_arm_weights, _DEFAULT_RECALL_ARM_WEIGHTS
-            )
-
-        raw_ignore = os.environ.get("LCM_IGNORE_SESSION_PATTERNS")
-        if raw_ignore is not None:
-            c.ignore_session_patterns = _parse_pattern_list(raw_ignore)
-            c.ignore_session_patterns_source = "env"
-
-        raw_stateless = os.environ.get("LCM_STATELESS_SESSION_PATTERNS")
-        if raw_stateless is not None:
-            c.stateless_session_patterns = _parse_pattern_list(raw_stateless)
-            c.stateless_session_patterns_source = "env"
-
-        raw_ignore_messages = os.environ.get("LCM_IGNORE_MESSAGE_PATTERNS")
-        if raw_ignore_messages is not None:
-            c.ignore_message_patterns = _parse_pattern_list(raw_ignore_messages)
-            c.ignore_message_patterns_source = "env"
+        raw_weights = _profile_env("LCM_RECALL_ARM_WEIGHTS")
+        if raw_weights is not None:
+            c.recall_arm_weights = _parse_arm_weights(raw_weights, _DEFAULT_RECALL_ARM_WEIGHTS)
+            _record("recall_arm_weights", "env:LCM_RECALL_ARM_WEIGHTS")
 
         c.config_sources = config_sources
         c.config_source_warnings = config_source_warnings
@@ -964,3 +945,43 @@ def _profile_value(key: str, raw: Any, expected: type) -> Any:
     if key == "fresh_tail_max_tokens":
         return max(0, raw)
     return raw
+
+
+def runtime_option(key, env_key, saved, parser, default):
+    """Resolve a scalar used outside the engine configuration dataclass."""
+    value = saved.get(key)
+    if type(value) is type(default) or (type(default) is float and type(value) is int):
+        if type(default) is not float or math.isfinite(value):
+            return type(default)(value), "plugin_settings"
+    raw = _profile_env(env_key)
+    if raw is not None:
+        try:
+            return parser(raw), f"env:{env_key}"
+        except ValueError:
+            pass
+    return default, "default"
+
+
+def slash_command_setting(saved):
+    return runtime_option("enable_slash_command", "LCM_ENABLE_SLASH_COMMAND", saved, _env_bool, False)
+
+
+DEFAULT_INTEGRITY_CHECK_INTERVAL_HOURS = 24.0
+
+
+def integrity_interval_setting(saved):
+    return runtime_option("fts_integrity_check_interval_hours", "LCM_FTS_INTEGRITY_CHECK_INTERVAL_HOURS",
+                          saved, _env_float, DEFAULT_INTEGRITY_CHECK_INTERVAL_HOURS)
+
+
+def effective_settings():
+    """Only manifest settings. Resolve the current profile without opening its archive."""
+    config = LCMConfig.from_env()
+    values = {
+        key: (getattr(config, key), config.config_sources.get(key, "default"))
+        for key in PROFILE_FIELD_TYPES
+    }
+    saved = _ledger_settings()
+    values["enable_slash_command"] = slash_command_setting(saved)
+    values["fts_integrity_check_interval_hours"] = integrity_interval_setting(saved)
+    return values

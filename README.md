@@ -229,7 +229,7 @@ without skill or hook registration keep their existing schema-driven behavior.
 
 ### Slash commands
 
-In Hermes Desktop, open **Settings → Plugins → hermes-lcm-ledger** and switch
+In Hermes Desktop, open **Settings → Plugins → LCM Ledger** and switch
 on **Enable /lcm commands** for a trusted operator profile. The switch defaults
 to off. Restart the CLI session or gateway to apply a change. Until a value
 is saved in the profile, Ledger uses `LCM_ENABLE_SLASH_COMMAND` if set.
@@ -292,20 +292,19 @@ Most installs only need `plugins.enabled` and `context.engine: lcm`.
 
 ### Desktop settings
 
-Open **Settings → Plugins → hermes-lcm-ledger** in the target Hermes profile.
-The form covers compaction, models and timeouts, storage, filtering and redaction,
-retrieval, embeddings, maintenance and operator commands. An archive path change
-selects another SQLite file at the next start. To keep using the current archive,
-keep its path.
+Open **Settings → Plugins → LCM Ledger**. On the first install or upgrade,
+enable Ledger's **Desktop** component in **Capabilities → Plugins** if prompted.
+The page names the connected profile and shows each setting's resolved value
+and source. Use **Refresh** to reread the profile. Automatic archive paths
+appear in the empty path fields. A running chat may apply a model-specific
+threshold or select a model for an individual call.
 
-Hermes saves edited fields under `plugins.entries.hermes-lcm-ledger.settings` in
-the profile configuration. Start a new Hermes process (restart the gateway for
-gateway sessions) to load the changes. An explicitly saved field takes priority
-over its `LCM_*` environment variable. For fields without a saved value, the form
-shows the built-in default. The running engine can inherit a different value from
-the environment or existing Hermes compression settings. Use `lcm_status` to
-inspect effective compaction settings. To return a field to inheritance, remove
-its key from the profile's Ledger settings.
+**Save changes** writes only the fields you edit, using Hermes' normal profile
+settings writer. Saved values take priority over their `LCM_*` variables.
+Remove a saved key from `plugins.entries.hermes-lcm-ledger.settings` to
+inherit again. New processes load the new configuration. The built-in **Agent
+settings** subpage remains available for manual overrides and shows manifest
+defaults for unset fields.
 
 Enter lists as JSON arrays, for example `["batch-*", "cron-*"]` for excluded
 session patterns. The environment-variable equivalents below use comma-separated

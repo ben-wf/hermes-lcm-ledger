@@ -1,10 +1,23 @@
 # LCM Ledger for Hermes
 
-LCM Ledger preserves raw conversation turns and large tool outputs in a local
-archive so an agent can retrieve them after context compaction. Benjamin
-Wittorf maintains this fork of **Stephen Schoettler and contributors’**
-[Hermes-LCM](https://github.com/stephenschoettler/hermes-lcm). The fork
-incorporates the [macOS storage and concurrency changes in PR #589](https://github.com/stephenschoettler/hermes-lcm/pull/589).
+LCM Ledger is a maintained Hermes-LCM fork for reliable local conversation
+archives, with SQLite concurrency fixes for macOS/APFS and native Hermes
+plugin support. It runs in production on Apple Silicon. CI tests the plugin
+on macOS and Linux with Python 3.14.
+
+## Why this fork?
+
+When several Hermes agents start at once, each needs its own session state,
+but they all use the same archive. Opening a fresh set of SQLite connections
+and repeating schema checks for every agent caused lock contention on APFS.
+Ledger lets agent clones reuse the parent engine’s storage connections while
+keeping each agent’s session and ingest cursor separate. The changes
+originated in [upstream PR #589](https://github.com/stephenschoettler/hermes-lcm/pull/589).
+
+Benjamin Wittorf maintains Ledger as a fork of
+[Hermes-LCM](https://github.com/stephenschoettler/hermes-lcm), the lossless
+context engine by Stephen Schoettler and contributors. It keeps raw turns
+and large tool outputs available for retrieval after context compaction.
 
 Based on the [LCM paper](https://papers.voltropy.com/LCM) by Ehrlich & Blackman
 (Voltropy PBC, Feb 2026). Inspired by
@@ -66,6 +79,7 @@ For older upstream archives, see the [schema upgrade and rollback notes](docs/op
 
 ## Table of contents
 
+- [Why this fork?](#why-this-fork)
 - [What it does](#what-it-does)
 - [LCM vs built-in compression](#lcm-vs-built-in-compression)
 - [Quick start](#quick-start)

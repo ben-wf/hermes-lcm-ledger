@@ -4343,6 +4343,8 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             "_generated_ignored_active_replay_placeholder_message_ids",
             set(),
         )
+        if source_messages is None and not generated_message_ids:
+            return [dict(message) for message in active_replay_messages]
         for idx, message in enumerate(active_replay_messages):
             copied_message = dict(message)
             if source_messages is not None and idx < len(source_messages):
@@ -4558,6 +4560,8 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         return assistant_output_quarantine_reason(content) is not None
 
     def _redact_active_replay_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if not self._config.sensitive_patterns_enabled:
+            return self._copy_active_replay_messages_preserving_generated_ids(messages)
         redacted_replay_messages: list[Dict[str, Any]] = []
         generated_message_ids = getattr(
             self,

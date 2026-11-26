@@ -61,9 +61,9 @@ def test_recall_policy_covers_evidence_safety_and_stable_tool_routing():
 
 
 def test_bundled_skill_has_valid_minimal_frontmatter_and_matching_tool_references():
-    skill_root = REPO_ROOT / "skills" / "hermes-lcm"
+    skill_root = REPO_ROOT / "skills" / "hermes-lcm-ledger"
     skill_text = (skill_root / "SKILL.md").read_text(encoding="utf-8")
-    assert skill_text.startswith("---\nname: hermes-lcm\ndescription:")
+    assert skill_text.startswith("---\nname: hermes-lcm-ledger\ndescription:")
     frontmatter = skill_text.split("---", 2)[1]
     keys = {
         line.split(":", 1)[0].strip()

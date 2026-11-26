@@ -951,7 +951,7 @@ def test_contract_records_host_ownership_versions_and_update_owner():
         "imported API changes."
     )
     assert contract["supported_versions"]["python"] == ["3.11", "3.12", "3.13", "3.14"]
-    assert contract["supported_versions"]["hermes_agent"] == ">=0.16,<1"
+    assert contract["supported_versions"]["hermes_agent"] == ">=0.23.4,<1"
     assert contract["runtime_scan"]["local_imports"] == ["hermes_lcm", "benchmarking"]
     assert set(contract["external_imports"]) == {
         "agent",

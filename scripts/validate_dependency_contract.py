@@ -17,7 +17,7 @@ from typing import Any, Iterable
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONTRACT = REPO_ROOT / "dependency-contract.json"
 _CONTRACT_VERSION_RE = re.compile(r"^[1-9]\d*\.\d+\.\d+$")
-_HOST_VERSION_RE = re.compile(r"^>=\d+\.\d+,<\d+$")
+_HOST_VERSION_RE = re.compile(r"^>=\d+\.\d+(?:\.\d+)?,<\d+$")
 _UNBOUND = object()
 
 
@@ -641,7 +641,7 @@ def validate_contract(repo_root: Path, contract: dict[str, Any]) -> list[str]:
         if not isinstance(host_versions, str) or not _HOST_VERSION_RE.fullmatch(
             host_versions
         ):
-            errors.append("supported_versions.hermes_agent must use >=major.minor,<major")
+            errors.append("supported_versions.hermes_agent must use a lower bound (major.minor or major.minor.patch) and an exclusive major upper bound")
         policy = supported_versions.get("optional_dependency_policy")
         if not isinstance(policy, str) or not policy.strip():
             errors.append("supported_versions.optional_dependency_policy is required")

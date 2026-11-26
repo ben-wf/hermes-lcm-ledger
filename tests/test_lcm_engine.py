@@ -363,7 +363,7 @@ def test_lcm_tool_status_includes_optional_cache_usage_metrics(engine):
     assert payload["cache_read_ratio"] == 0.381
     assert payload["last_compression_status"] == "idle"
     assert payload["last_compression_noop_reason"] == ""
-    assert payload["runtime_identity"]["plugin_name"] == "hermes-lcm"
+    assert payload["runtime_identity"]["plugin_name"] == "hermes-lcm-ledger"
     assert payload["runtime_identity"]["database_path_source"] == "config.database_path"
     assert payload["config"]["summary_timeout_ms"] == 60_000
 
@@ -1170,7 +1170,7 @@ def test_lcm_tool_status_reports_runtime_identity_before_session_binding(tmp_pat
     payload = json.loads(lcm_tools.lcm_status({}, engine=engine))
 
     assert payload["error"] == "No active session"
-    assert payload["runtime_identity"]["plugin_name"] == "hermes-lcm"
+    assert payload["runtime_identity"]["plugin_name"] == "hermes-lcm-ledger"
     assert payload["runtime_identity"]["session_bound"] is False
     assert payload["runtime_identity"]["database_path_source"] == "config.database_path"
 
@@ -1193,8 +1193,8 @@ def test_get_status_exposes_runtime_identity_for_loaded_plugin_tree(tmp_path):
     repo_root = Path(__file__).resolve().parent.parent
 
     assert identity["engine"] == "lcm"
-    assert identity["plugin_name"] == "hermes-lcm"
-    assert identity["plugin_version"] == "1.0.0-rc.1"
+    assert identity["plugin_name"] == "hermes-lcm-ledger"
+    assert identity["plugin_version"] == "0.1.0-rc.1"
     assert Path(identity["plugin_path"]) == repo_root
     assert Path(identity["module_path"]).name == "engine.py"
     assert Path(identity["database_path"]) == db_path
@@ -1219,22 +1219,22 @@ def test_plugin_metadata_refreshes_when_manifest_changes(tmp_path, monkeypatch):
     monkeypatch.setattr(identity_mod, "_PLUGIN_METADATA", None)
 
     initial = identity_mod._plugin_metadata()
-    assert initial["name"] == "hermes-lcm"
-    assert initial["version"] == "1.0.0-rc.1"
+    assert initial["name"] == "hermes-lcm-ledger"
+    assert initial["version"] == "0.1.0-rc.1"
 
-    updated = original.replace('version: "1.0.0-rc.1"', 'version: "9.9.9-test"')
+    updated = original.replace('version: "0.1.0-rc.1"', 'version: "9.9.9-test"')
     if updated == original:
-        updated = original.replace('version: 1.0.0-rc.1', 'version: 9.9.9-test')
+        updated = original.replace('version: 0.1.0-rc.1', 'version: 9.9.9-test')
     assert updated != original
 
     try:
         manifest.write_text(updated, encoding="utf-8")
         refreshed = identity_mod._plugin_metadata()
-        assert refreshed == {"name": "hermes-lcm", "version": "9.9.9-test"}
+        assert refreshed == {"name": "hermes-lcm-ledger", "version": "9.9.9-test"}
 
         manifest.unlink()
         fallback = identity_mod._plugin_metadata()
-        assert fallback == {"name": "hermes-lcm", "version": "9.9.9-test"}
+        assert fallback == {"name": "hermes-lcm-ledger", "version": "9.9.9-test"}
     finally:
         manifest.write_text(original, encoding="utf-8")
         monkeypatch.setattr(identity_mod, "_PLUGIN_METADATA", None)
@@ -1252,7 +1252,7 @@ def test_plugin_metadata_defaults_when_manifest_missing_before_first_read(tmp_pa
     try:
         manifest.unlink()
         metadata = identity_mod._plugin_metadata()
-        assert metadata == {"name": "hermes-lcm", "version": "unknown"}
+        assert metadata == {"name": "hermes-lcm-ledger", "version": "unknown"}
     finally:
         manifest.write_text(original, encoding="utf-8")
         monkeypatch.setattr(identity_mod, "_PLUGIN_METADATA", None)
@@ -1261,8 +1261,8 @@ def test_plugin_metadata_defaults_when_manifest_missing_before_first_read(tmp_pa
 def test_lcm_doctor_json_includes_runtime_identity(engine):
     payload = json.loads(engine.handle_tool_call("lcm_doctor", {}))
 
-    assert payload["runtime_identity"]["plugin_name"] == "hermes-lcm"
-    assert payload["runtime_identity"]["plugin_version"] == "1.0.0-rc.1"
+    assert payload["runtime_identity"]["plugin_name"] == "hermes-lcm-ledger"
+    assert payload["runtime_identity"]["plugin_version"] == "0.1.0-rc.1"
     assert "plugin_git_commit" in payload["runtime_identity"]
 
 

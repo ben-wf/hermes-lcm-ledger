@@ -115,7 +115,7 @@ claim that Hermes core has no persisted record of pre-compression history.
 
 ### Prerequisites
 
-- Hermes Agent
+- Hermes Agent 0.23.4 or later in the 0.x series
 - Python 3.11+
 - No required third-party runtime dependencies
 
@@ -131,7 +131,13 @@ that the host's resolved environment is free of known vulnerabilities.
 
 ### Install the plugin
 
-From the Ledger checkout, install into the active Hermes profile:
+Install the public fork into the active Hermes profile:
+
+```bash
+hermes plugins install ben-wf/hermes-lcm-ledger
+```
+
+To install the exact commit of a local checkout:
 
 ```bash
 hermes plugins install "file://$(pwd -P)" --ref "$(git rev-parse HEAD)"

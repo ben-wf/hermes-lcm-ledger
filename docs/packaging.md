@@ -7,7 +7,13 @@ The core archive and full-text search use SQLite. Optional retrieval
 dependencies and the supported host range are documented in
 [the dependency contract](../dependency-contract.json).
 
-From the Ledger checkout, install into the active Hermes profile:
+Install the public fork into the active Hermes profile:
+
+```bash
+hermes plugins install ben-wf/hermes-lcm-ledger
+```
+
+To install the exact commit of a local checkout:
 
 ```bash
 hermes plugins install "file://$(pwd -P)" --ref "$(git rev-parse HEAD)"

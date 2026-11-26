@@ -10,7 +10,13 @@ This page holds the detailed install, activation, configuration, diagnostics, an
 
 ## Install
 
-From the Ledger checkout, install into the active Hermes profile:
+Install the public fork into the active Hermes profile:
+
+```bash
+hermes plugins install ben-wf/hermes-lcm-ledger
+```
+
+To install the exact commit of a local checkout:
 
 ```bash
 hermes plugins install "file://$(pwd -P)" --ref "$(git rev-parse HEAD)"

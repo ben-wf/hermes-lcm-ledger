@@ -3916,7 +3916,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
 
         identity: Dict[str, Any] = {
             "engine": self.name,
-            "plugin_name": metadata.get("name", "hermes-lcm"),
+            "plugin_name": metadata.get("name", "hermes-lcm-ledger"),
             "plugin_version": metadata.get("version", "unknown"),
             "plugin_path": str(_PLUGIN_ROOT),
             "module_path": str(Path(__file__).resolve()),

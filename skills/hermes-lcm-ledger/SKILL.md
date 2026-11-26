@@ -1,5 +1,5 @@
 ---
-name: hermes-lcm
+name: hermes-lcm-ledger
 description: Use, configure, diagnose, and retrieve exact evidence with the Hermes-LCM lossless context plugin.
 ---
 
@@ -9,7 +9,7 @@ Use this skill when a task concerns Hermes-LCM setup, operation, compaction, dia
 
 Start here:
 
-1. Confirm that the `hermes-lcm` plugin is enabled and `context.engine` is `lcm`.
+1. Confirm that the `hermes-lcm-ledger` plugin is enabled and `context.engine` is `lcm`.
 2. For exact historical claims, use the recall workflow instead of trusting a compacted summary.
 3. Use `lcm_status`, `lcm_inspect`, and `lcm_doctor` before changing configuration or attempting repair.
 4. Treat slash-command apply paths as mutations: preview first, keep backups, and require the user's authorization.

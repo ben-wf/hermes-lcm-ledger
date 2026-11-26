@@ -1,19 +1,10 @@
-<p align="center">
-  <img src="docs/banner.png" alt="HERMES-LCM" width="800">
-</p>
+# LCM Ledger for Hermes
 
-[![CI](https://github.com/stephenschoettler/hermes-lcm/actions/workflows/ci.yml/badge.svg)](https://github.com/stephenschoettler/hermes-lcm/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/stephenschoettler/hermes-lcm)](https://github.com/stephenschoettler/hermes-lcm/releases)
-[![Python 3.11-3.14](https://img.shields.io/badge/Python-3.11--3.14-3776AB?logo=python&logoColor=white)](https://github.com/stephenschoettler/hermes-lcm/actions/workflows/ci.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-
-**Lossless Context Management plugin for [Hermes Agent](https://github.com/NousResearch/hermes-agent).**
-
-> Bounded context, unbounded memory. Nothing is ever lost.
-
-`hermes-lcm` replaces one-shot active-context compression with a SQLite-backed,
-DAG-based context engine. It keeps the live prompt bounded, preserves raw
-messages, and gives the agent tools to recover exact detail after compaction.
+LCM Ledger preserves raw conversation turns and large tool outputs in a local
+archive so an agent can retrieve them after context compaction. Benjamin
+Wittorf maintains this fork of **Stephen Schoettler and contributors’**
+[Hermes-LCM](https://github.com/stephenschoettler/hermes-lcm). The fork
+incorporates the [macOS storage and concurrency changes in PR #589](https://github.com/stephenschoettler/hermes-lcm/pull/589).
 
 Based on the [LCM paper](https://papers.voltropy.com/LCM) by Ehrlich & Blackman
 (Voltropy PBC, Feb 2026). Inspired by
@@ -50,7 +41,7 @@ host tools such as `session_search`, but the model's active context no longer
 contains the compacted turns verbatim or a structured drill-down path back to
 them.
 
-`hermes-lcm` instead:
+`hermes-lcm-ledger` instead:
 
 1. **Persists messages** in a plugin-local SQLite store with FTS metadata.
 2. **Compacts older context** into depth-aware summary nodes.
@@ -110,7 +101,7 @@ built-in compression rewrites the active prompt. Built-in compression can still
 be lossy in the active context, but previous content may be recoverable later
 through host-level history tools such as `session_search`.
 
-`hermes-lcm` is different because recall is part of the active context engine:
+`hermes-lcm-ledger` is different because recall is part of the active context engine:
 
 - plugin-local store and DAG built specifically for drill-down
 - current-session retrieval through LCM tools, not an auxiliary cross-session
@@ -140,39 +131,29 @@ that the host's resolved environment is free of known vulnerabilities.
 
 ### Install the plugin
 
-Canonical install path: clone `hermes-lcm` as a general user plugin.
+From the Ledger checkout, install into the active Hermes profile:
 
 ```bash
-git clone https://github.com/stephenschoettler/hermes-lcm \
-  ~/.hermes/plugins/hermes-lcm
+hermes plugins install "file://$(pwd -P)" --ref "$(git rev-parse HEAD)"
 ```
 
-For a profile-specific install:
+For development, `./scripts/install.sh` links this checkout and its skill into
+the selected profile. Use just one installation method per profile.
 
-```bash
-git clone https://github.com/stephenschoettler/hermes-lcm \
-  ~/.hermes/profiles/myprofile/plugins/hermes-lcm
-```
-
-From an existing checkout, install a symlink:
-
-```bash
-./scripts/install.sh
-
-# Optional profile-aware install:
-HERMES_PROFILE=myprofile ./scripts/install.sh
-```
-
-Run `scripts/install.sh` even when the checkout already lives at the canonical
-plugin path. It leaves that checkout in place and exposes the bundled
-`hermes-lcm` skill in the matching global/profile `skills/` directory. The
-installer preflights both paths and refuses conflicts before creating links.
+When switching from Hermes-LCM, stop all writers and take a consistent backup
+of the profile database and its external payload directory. Replace
+`hermes-lcm` in `plugins.enabled` with `hermes-lcm-ledger`. Carry over any
+plugin-specific settings and update monitoring that checks the plugin name.
+Keep `context.engine: lcm`, the existing `lcm:` settings, database and payload
+paths. Enable only one LCM implementation in a profile. To roll back, stop
+writers, restore the previous config and plugin, and restore the backup if the
+archive was damaged. Restoring an old snapshot discards later turns.
 
 ### Activate it
 
 The plugin has two names:
 
-- plugin manifest name: `hermes-lcm`
+- plugin manifest name: `hermes-lcm-ledger`
 - runtime context engine name: `lcm`
 
 Both must be configured:
@@ -180,7 +161,7 @@ Both must be configured:
 ```yaml
 plugins:
   enabled:
-    - hermes-lcm
+    - hermes-lcm-ledger
 
 context:
   engine: lcm
@@ -198,19 +179,19 @@ hermes plugins
 
 Expected signals:
 
-- plugin list includes `hermes-lcm`
+- plugin list includes `hermes-lcm-ledger`
 - selected context engine is `lcm`
 - tool list includes `lcm_grep`, `lcm_recall`, `lcm_recent`,
   `lcm_load_session`, `lcm_describe`, `lcm_expand`, `lcm_expand_query`,
   `lcm_status`, `lcm_inspect`, and `lcm_doctor`
-- the normal available-skills index includes `hermes-lcm`; current hosts can
-  also resolve the explicit plugin-qualified skill `hermes-lcm:hermes-lcm`
+- the normal available-skills index includes `hermes-lcm-ledger`; current hosts can
+  also resolve the explicit plugin-qualified skill `hermes-lcm-ledger:hermes-lcm-ledger`
 
 Typical output:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm v1.0.0-rc.1 (15 tools)
+  ✓ hermes-lcm-ledger v0.1.0-rc.1 (15 tools)
 
 Provider Plugins:
   Context Engine: lcm
@@ -229,23 +210,9 @@ there.
 
 ### Update it
 
-If you cloned directly into the plugin directory:
-
-```bash
-cd ~/.hermes/plugins/hermes-lcm && git pull --ff-only
-```
-
-For a profile-specific install:
-
-```bash
-cd ~/.hermes/profiles/myprofile/plugins/hermes-lcm && git pull --ff-only
-```
-
-If you installed a symlink from a separate checkout:
-
-```bash
-./scripts/update.sh
-```
+For a managed installation, install the next reviewed commit from the same
+Ledger checkout using `hermes plugins install` with `--ref` and `--force`.
+For a development link, update the linked checkout.
 
 Restart Hermes after updating.
 
@@ -288,11 +255,11 @@ outside the LCM database.
 
 ## Recall skill and policy
 
-Hermes-LCM ships `skills/hermes-lcm/SKILL.md` plus progressive-disclosure
+Hermes-LCM ships `skills/hermes-lcm-ledger/SKILL.md` plus progressive-disclosure
 references for configuration, architecture, diagnostics, recall routing, and
 session lifecycle. The installer links that directory into the active Hermes
 profile so it appears in ordinary skill discovery. On hosts with plugin skill
-registration, it is also available explicitly as `hermes-lcm:hermes-lcm`.
+registration, it is also available explicitly as `hermes-lcm-ledger:hermes-lcm-ledger`.
 
 When LCM is the active context engine for a bound session, the plugin registers
 one deterministic `pre_llm_call` hook. Hermes injects the canonical policy into
@@ -307,7 +274,7 @@ system-prompt cache prefix. The policy:
 - does not force a tool call when the current context is already sufficient.
 
 The canonical bytes live in
-`skills/hermes-lcm/references/recall-policy.md`. Merely loading the plugin does
+`skills/hermes-lcm-ledger/references/recall-policy.md`. Merely loading the plugin does
 not inject them when another context engine is serving the session. Older hosts
 without skill or hook registration keep their existing schema-driven behavior.
 
@@ -683,8 +650,8 @@ when those sources still belong to a previous session.
 
 ## OpenClaw/lossless-claw import
 
-`hermes-lcm` includes an opt-in operator script for backfilling OpenClaw history
-into the local hermes-lcm SQLite store. It supports two source shapes:
+`hermes-lcm-ledger` includes an opt-in operator script for backfilling OpenClaw history
+into the local hermes-lcm-ledger SQLite store. It supports two source shapes:
 
 1. **SQLite LCM database** (`--source-db`) for migrations from an existing
    lossless-claw/OpenClaw `lcm.db`.
@@ -765,7 +732,7 @@ manifest-based rollback. See the [operator guide](docs/operator-guide.md#histori
 
 ### `hermes plugins` shows `lcm (not found)` but LCM tools exist
 
-If `plugins.enabled` contains `hermes-lcm`, `context.engine: lcm` is set, and
+If `plugins.enabled` contains `hermes-lcm-ledger`, `context.engine: lcm` is set, and
 the runtime exposes LCM tools, LCM is loaded. The `lcm (not found)` line is a
 Hermes host discovery/status mismatch, not an LCM storage or compaction failure.
 
@@ -785,7 +752,7 @@ store. It records raw messages, compacts old material into a summary DAG, and
 exposes retrieval tools that can drill back into exact stored sources.
 
 <p align="center">
-  <img src="docs/architecture.png" alt="hermes-lcm architecture" width="700">
+  <img src="docs/architecture.png" alt="hermes-lcm-ledger architecture" width="700">
 </p>
 
 ## How it works
@@ -818,7 +785,7 @@ exposes retrieval tools that can drill back into exact stored sources.
 - [Contributing guide](CONTRIBUTING.md)
 - [Code of conduct](CODE_OF_CONDUCT.md)
 - [Security policy](SECURITY.md)
-- [Releases](https://github.com/stephenschoettler/hermes-lcm/releases)
+- [Changelog](CHANGELOG.md)
 
 ## Development
 
@@ -855,19 +822,9 @@ priority. New features should be scoped, backwards-compatible, and tested.
 See [CONTRIBUTING.md](CONTRIBUTING.md) for branch, validation, and PR guidance.
 See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for project conduct expectations
 and [SECURITY.md](SECURITY.md) for vulnerability reporting.
-See the [releases page](https://github.com/stephenschoettler/hermes-lcm/releases)
+See the [changelog](CHANGELOG.md)
 for changelogs.
 
 ## License
 
 [MIT](LICENSE)
-
-## Star history
-
-<a href="https://www.star-history.com/?repos=stephenschoettler%2Fhermes-lcm&type=timeline&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=stephenschoettler/hermes-lcm&type=timeline&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=stephenschoettler/hermes-lcm&type=timeline&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=stephenschoettler/hermes-lcm&type=timeline&legend=top-left" />
- </picture>
-</a>

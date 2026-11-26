@@ -1891,7 +1891,8 @@ class MessageStore:
         the private connection. Requires a live connection: a closed store
         raises, matching direct ``_conn.commit()`` use.
         """
-        self._conn.commit()
+        with self._write_lock:
+            self._conn.commit()
 
     def backup(self, dest: sqlite3.Connection) -> None:
         """Copy the store's database into the already-open ``dest`` connection.
@@ -1900,15 +1901,16 @@ class MessageStore:
         store without reaching its private connection. Requires a live
         connection, matching direct ``_conn.backup(dest)`` use.
         """
-        self._conn.backup(dest)
+        with self._write_lock:
+            self._conn.backup(dest)
 
     # -- Lifecycle ----------------------------------------------------------
 
     def close(self) -> None:
-        conn = getattr(self, "_conn", None)
-        if conn:
-            conn.close()
-            self._conn = None
+        with self._write_lock:
+            if self._conn is not None:
+                self._conn.close()
+                self._conn = None
 
     def __del__(self) -> None:  # pragma: no cover - defensive resource cleanup
         try:

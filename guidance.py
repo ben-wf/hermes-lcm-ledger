@@ -8,7 +8,7 @@ from pathlib import Path
 RECALL_POLICY_PATH = (
     Path(__file__).resolve().parent
     / "skills"
-    / "hermes-lcm"
+    / "hermes-lcm-ledger"
     / "references"
     / "recall-policy.md"
 )

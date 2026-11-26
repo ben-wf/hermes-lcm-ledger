@@ -1,56 +1,26 @@
-# Packaging and distribution posture
+# Installing LCM Ledger
 
-## Current decision
+Hermes loads the directory plugin through `plugin.yaml` and
+`register(ctx)` in the adjacent `__init__.py`. The metadata-only
+`pyproject.toml` lets the Hermes package manager resolve the checkout.
+The core archive and full-text search use SQLite. Optional retrieval
+dependencies and the supported host range are documented in
+[the dependency contract](../dependency-contract.json).
 
-`hermes-lcm` intentionally remains a clone-or-symlink Hermes user plugin for now. The supported install path is:
-
-```bash
-git clone https://github.com/stephenschoettler/hermes-lcm \
-  ~/.hermes/plugins/hermes-lcm
-```
-
-For profile-specific installs, clone under `~/.hermes/profiles/<profile>/plugins/hermes-lcm`. For development checkouts, `scripts/install.sh` creates a profile-aware symlink into the active Hermes plugin directory and refuses to overwrite an existing checkout or unrelated symlink.
-
-## Why not pip-style packaging yet?
-
-The repository is a Hermes plugin, not a standalone Python application. Runtime discovery currently depends on:
-
-- `plugin.yaml` declaring the plugin name and registered tools
-- the repo root containing `__init__.py` for Hermes plugin registration
-- the operator placing or symlinking the checkout into Hermes' plugin search path
-- no plugin-resolved third-party runtime dependencies beyond the host APIs, with optional features such as `tiktoken`, `regex`, NumPy, and FastEmbed supplied by the host environment
-
-There is no `pyproject.toml` or package metadata today, and that is deliberate until Hermes plugin packaging/discovery has a stable target for pip-installed plugins. Adding generic Python packaging before the host install contract is clear would create a second install story without making first-run activation simpler.
-
-## Host-owned dependency assurance
-
-[`dependency-contract.json`](../dependency-contract.json) is the authoritative,
-versioned host-owned dependency boundary. It records supported Hermes Agent and
-Python versions, the update owner, and every external import observed in shipped
-plugin, operator-script, and benchmarking sources. Validate it with:
+From the Ledger checkout, install into the active Hermes profile:
 
 ```bash
-python scripts/validate_dependency_contract.py --report-environment
+hermes plugins install "file://$(pwd -P)" --ref "$(git rev-parse HEAD)"
 ```
 
-The validator fails when runtime imports and the contract drift. Its local
-availability/version report is not a lock, SBOM, or vulnerability scan; those
-remain the responsibility of the resolved Hermes Agent host environment. See
-[Dependency assurance](dependency-assurance.md) for update and scanner evidence
-requirements.
+For development, `./scripts/install.sh` links this checkout and its skill into
+the selected profile. Use just one installation method per profile.
 
-## Next packaging step
-
-Make packaging a separate implementation lane only when one of these is true:
-
-1. Hermes Agent documents a stable pip/distribution entrypoint for plugins.
-2. Users need version-pinned installs without direct git checkouts.
-3. Release automation needs packaged artifacts beyond GitHub tags/releases.
-
-The narrow next step would be packaging metadata plus tests that prove a packaged install still exposes `hermes-lcm`, context engine `lcm`, and all 15 LCM tools through `hermes plugins`. Until then, clone/symlink remains the documented path.
-
-## Current install and update references
-
-- Quickstart: [README](../README.md)
-- Detailed install/update/verify: [Operator guide](operator-guide.md)
-- Standalone install script contract: [`tests/test_packaging_install.py`](../tests/test_packaging_install.py)
+When switching from Hermes-LCM, stop all writers and take a consistent backup
+of the profile database and its external payload directory. Replace
+`hermes-lcm` in `plugins.enabled` with `hermes-lcm-ledger`. Carry over any
+plugin-specific settings and update monitoring that checks the plugin name.
+Keep `context.engine: lcm`, the existing `lcm:` settings, database and payload
+paths. Enable only one LCM implementation in a profile. To roll back, stop
+writers, restore the previous config and plugin, and restore the backup if the
+archive was damaged. Restoring an old snapshot discards later turns.

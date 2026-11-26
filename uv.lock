@@ -3,6 +3,6 @@ revision = 3
 requires-python = ">=3.11"
 
 [[package]]
-name = "hermes-lcm"
-version = "1.0.0rc1"
+name = "hermes-lcm-ledger"
+version = "0.1.0rc1"
 source = { virtual = "." }

@@ -32,7 +32,7 @@ def _plugin_metadata() -> dict[str, str]:
     """
     global _PLUGIN_METADATA
 
-    metadata = {"name": "hermes-lcm", "version": "unknown"}
+    metadata = {"name": "hermes-lcm-ledger", "version": "unknown"}
     manifest = _PLUGIN_ROOT / "plugin.yaml"
     try:
         for line in manifest.read_text(encoding="utf-8").splitlines():

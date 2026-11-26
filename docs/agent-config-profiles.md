@@ -13,7 +13,7 @@ each feature does and why, see [Feature overview](features-overview.md).
 1. **Environment variables (`LCM_*`) are the primary surface** and always win.
    Set them in the environment that launches Hermes.
 2. **`~/.hermes/config.yaml`** participates in three narrow, deliberate ways:
-   - `plugins.enabled: [hermes-lcm]` + `context.engine: lcm` activate the
+   - `plugins.enabled: [hermes-lcm-ledger]` + `context.engine: lcm` activate the
      plugin (see [Operator guide → Activate](operator-guide.md#activate));
    - `lcm.context_threshold` is the one LCM key supported in YAML (used only
      when `LCM_CONTEXT_THRESHOLD` is not set; other keys under `lcm:` are
@@ -38,7 +38,7 @@ Nothing to configure. Enable the plugin and stop:
 # ~/.hermes/config.yaml
 plugins:
   enabled:
-    - hermes-lcm
+    - hermes-lcm-ledger
 context:
   engine: lcm
 ```

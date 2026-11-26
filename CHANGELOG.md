@@ -2,6 +2,12 @@
 
 This repo also publishes GitHub Releases. This file is the repo-root release surface for operators who want the recent release arc without leaving the checkout.
 
+## v0.1.0-rc.1 - 2026-11-26
+
+First LCM Ledger candidate. Includes PR #589, public turn-hook registration
+and synchronized message-store backup and close. Earlier entries below
+document the upstream project.
+
 ## Unreleased
 
 ### Fixed

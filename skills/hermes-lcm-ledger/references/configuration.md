@@ -5,7 +5,7 @@ Hermes-LCM is a general Hermes plugin and a context engine. Both identities must
 ```yaml
 plugins:
   enabled:
-    - hermes-lcm
+    - hermes-lcm-ledger
 
 context:
   engine: lcm
@@ -24,8 +24,8 @@ HERMES_PROFILE=myprofile ./scripts/install.sh
 
 The installer exposes both:
 
-- `plugins/hermes-lcm` for plugin loading;
-- `skills/hermes-lcm` for normal skill discovery.
+- `plugins/hermes-lcm-ledger` for plugin loading;
+- `skills/hermes-lcm-ledger` for normal skill discovery.
 
 It refuses conflicting paths rather than overwriting an existing install.
 

@@ -276,14 +276,14 @@ def test_install_script_creates_profile_aware_symlink_and_prints_activation_step
         text=True,
     )
 
-    target = hermes_home / "profiles" / "sandbox" / "plugins" / "hermes-lcm"
-    skill_target = hermes_home / "profiles" / "sandbox" / "skills" / "hermes-lcm"
+    target = hermes_home / "profiles" / "sandbox" / "plugins" / "hermes-lcm-ledger"
+    skill_target = hermes_home / "profiles" / "sandbox" / "skills" / "hermes-lcm-ledger"
     assert target.is_symlink()
     assert target.resolve() == repo_root.resolve()
     assert skill_target.is_symlink()
-    assert skill_target.resolve() == (repo_root / "skills" / "hermes-lcm").resolve()
+    assert skill_target.resolve() == (repo_root / "skills" / "hermes-lcm-ledger").resolve()
     assert "plugins:" in result.stdout
-    assert "- hermes-lcm" in result.stdout
+    assert "- hermes-lcm-ledger" in result.stdout
     assert "context:" in result.stdout
     assert "engine: lcm" in result.stdout
     assert "Discoverable skill:" in result.stdout
@@ -308,16 +308,16 @@ def test_install_script_is_idempotent_for_plugin_and_skill_links(tmp_path):
             text=True,
         )
 
-    assert (hermes_home / "plugins" / "hermes-lcm").resolve() == repo_root.resolve()
-    assert (hermes_home / "skills" / "hermes-lcm").resolve() == (
-        repo_root / "skills" / "hermes-lcm"
+    assert (hermes_home / "plugins" / "hermes-lcm-ledger").resolve() == repo_root.resolve()
+    assert (hermes_home / "skills" / "hermes-lcm-ledger").resolve() == (
+        repo_root / "skills" / "hermes-lcm-ledger"
     ).resolve()
 
 
 def test_install_script_preflights_skill_conflict_before_creating_plugin_link(tmp_path):
     repo_root = Path(__file__).resolve().parent.parent
     hermes_home = tmp_path / "hermes-home"
-    skill_target = hermes_home / "skills" / "hermes-lcm"
+    skill_target = hermes_home / "skills" / "hermes-lcm-ledger"
     skill_target.mkdir(parents=True)
     (skill_target / "SKILL.md").write_text("existing skill\n", encoding="utf-8")
 
@@ -335,18 +335,18 @@ def test_install_script_preflights_skill_conflict_before_creating_plugin_link(tm
 
     assert result.returncode != 0
     assert "Refusing to replace existing skill path" in result.stderr
-    assert not (hermes_home / "plugins" / "hermes-lcm").exists()
+    assert not (hermes_home / "plugins" / "hermes-lcm-ledger").exists()
 
 
 def test_install_script_accepts_checkout_already_in_canonical_plugin_path(tmp_path):
     repo_root = Path(__file__).resolve().parent.parent
     hermes_home = tmp_path / "hermes-home"
-    checkout = hermes_home / "plugins" / "hermes-lcm"
+    checkout = hermes_home / "plugins" / "hermes-lcm-ledger"
     (checkout / "scripts").mkdir(parents=True)
-    (checkout / "skills" / "hermes-lcm").mkdir(parents=True)
+    (checkout / "skills" / "hermes-lcm-ledger").mkdir(parents=True)
     shutil.copy2(repo_root / "scripts" / "install.sh", checkout / "scripts" / "install.sh")
-    (checkout / "skills" / "hermes-lcm" / "SKILL.md").write_text(
-        "---\nname: hermes-lcm\ndescription: test\n---\n",
+    (checkout / "skills" / "hermes-lcm-ledger" / "SKILL.md").write_text(
+        "---\nname: hermes-lcm-ledger\ndescription: test\n---\n",
         encoding="utf-8",
     )
 
@@ -364,15 +364,15 @@ def test_install_script_accepts_checkout_already_in_canonical_plugin_path(tmp_pa
 
     assert result.returncode == 0, result.stderr
     assert checkout.is_dir()
-    skill_target = hermes_home / "skills" / "hermes-lcm"
+    skill_target = hermes_home / "skills" / "hermes-lcm-ledger"
     assert skill_target.is_symlink()
-    assert skill_target.resolve() == (checkout / "skills" / "hermes-lcm").resolve()
+    assert skill_target.resolve() == (checkout / "skills" / "hermes-lcm-ledger").resolve()
 
 
 def test_install_script_refuses_to_replace_existing_non_symlink_path(tmp_path):
     repo_root = Path(__file__).resolve().parent.parent
     hermes_home = tmp_path / "hermes-home"
-    target = hermes_home / "plugins" / "hermes-lcm"
+    target = hermes_home / "plugins" / "hermes-lcm-ledger"
     target.mkdir(parents=True)
     (target / "README.txt").write_text("existing checkout", encoding="utf-8")
 
@@ -424,8 +424,8 @@ def test_plugin_entrypoint_registers_lcm_context_engine():
     assert engine.name == "lcm"
     identity = engine.get_status()["runtime_identity"]
     repo_root = Path(__file__).resolve().parent.parent
-    assert identity["plugin_name"] == "hermes-lcm"
-    assert identity["plugin_version"] == "1.0.0-rc.1"
+    assert identity["plugin_name"] == "hermes-lcm-ledger"
+    assert identity["plugin_version"] == "0.1.0-rc.1"
     assert Path(identity["plugin_path"]) == repo_root
     assert identity["database_path_source"] in {"config.database_path", "hermes_home", "default_home"}
     assert identity["plugin_git_commit"]
@@ -576,8 +576,8 @@ def test_plugin_entrypoint_registers_bundled_skill_and_active_lcm_recall_policy(
 
     assert len(registered_skills) == 1
     name, path, description = registered_skills[0]
-    assert name == "hermes-lcm"
-    skill_md = Path(module.__file__).resolve().parent / "skills" / "hermes-lcm" / "SKILL.md"
+    assert name == "hermes-lcm-ledger"
+    skill_md = Path(module.__file__).resolve().parent / "skills" / "hermes-lcm-ledger" / "SKILL.md"
     assert path == skill_md
     assert path.is_file()
     assert "recall" in description.lower()
@@ -1392,16 +1392,19 @@ def test_slash_status_stays_unbound_until_lane_has_an_active_runtime(
         ctx.engine.shutdown()
 
 
+class _HookContext:
+    def register_hook(self, name, callback):
+        if not hasattr(self, "hooks"):
+            self.hooks = {}
+        assert name not in self.hooks
+        self.hooks[name] = callback
+
+
 def test_post_llm_hook_resolves_registered_active_clone_without_host_context_compressor(monkeypatch, tmp_path):
     module = _load_plugin_entrypoint_module("hermes_lcm_post_hook_registered_clone")
-    manager = types.SimpleNamespace(_hooks={})
-    fake_plugins = types.SimpleNamespace(get_plugin_manager=lambda: manager)
-    fake_hermes_cli = types.SimpleNamespace(plugins=fake_plugins)
-    monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
-    monkeypatch.setitem(sys.modules, "hermes_cli.plugins", fake_plugins)
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes_home"))
 
-    class _CtxNoTool:
+    class _CtxNoTool(_HookContext):
         def __init__(self):
             self.engine = None
 
@@ -1418,7 +1421,7 @@ def test_post_llm_hook_resolves_registered_active_clone_without_host_context_com
         platform="discord",
         conversation_id="agent:main:discord:thread:t:t",
     )
-    hook = manager._hooks["post_llm_call"][-1]
+    hook = ctx.hooks["post_llm_call"]
     history = [{"role": "user", "content": "registered clone canary"}]
 
     clone_ingests = []
@@ -1451,15 +1454,10 @@ def test_post_llm_hook_resolves_registered_active_clone_without_host_context_com
 
 def test_post_llm_hook_does_not_foreground_match_side_channel_clone(monkeypatch, tmp_path):
     module = _load_plugin_entrypoint_module("hermes_lcm_post_hook_side_channel_clone")
-    manager = types.SimpleNamespace(_hooks={})
-    fake_plugins = types.SimpleNamespace(get_plugin_manager=lambda: manager)
-    fake_hermes_cli = types.SimpleNamespace(plugins=fake_plugins)
-    monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
-    monkeypatch.setitem(sys.modules, "hermes_cli.plugins", fake_plugins)
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes_home"))
     monkeypatch.setenv("LCM_STATELESS_SESSION_PATTERNS", "side-channel")
 
-    class _CtxNoTool:
+    class _CtxNoTool(_HookContext):
         def __init__(self):
             self.engine = None
 
@@ -1489,7 +1487,7 @@ def test_post_llm_hook_does_not_foreground_match_side_channel_clone(monkeypatch,
     monkeypatch.setattr(ctx.engine, "ingest", lambda messages: singleton_ingests.append(list(messages)))
     history = [{"role": "user", "content": "foreground turn"}]
 
-    manager._hooks["post_llm_call"][-1](
+    ctx.hooks["post_llm_call"](
         session_id="foreground-session",
         conversation_id="agent:main:discord:dm:42",
         platform="discord",
@@ -1506,14 +1504,9 @@ def test_post_llm_hook_does_not_foreground_match_side_channel_clone(monkeypatch,
 def test_post_llm_hook_ignores_stale_registered_clone_after_rebind(monkeypatch, tmp_path):
     for lookup_mode in ("session", "conversation", "mismatched_conversation"):
         module = _load_plugin_entrypoint_module(f"hermes_lcm_post_hook_stale_{lookup_mode}")
-        manager = types.SimpleNamespace(_hooks={})
-        fake_plugins = types.SimpleNamespace(get_plugin_manager=lambda: manager)
-        fake_hermes_cli = types.SimpleNamespace(plugins=fake_plugins)
-        monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
-        monkeypatch.setitem(sys.modules, "hermes_cli.plugins", fake_plugins)
         monkeypatch.setenv("HERMES_HOME", str(tmp_path / f"hermes_home_{lookup_mode}"))
 
-        class _CtxNoTool:
+        class _CtxNoTool(_HookContext):
             def __init__(self):
                 self.engine = None
 
@@ -1550,7 +1543,7 @@ def test_post_llm_hook_ignores_stale_registered_clone_after_rebind(monkeypatch, 
         elif lookup_mode == "mismatched_conversation":
             kwargs["session_id"] = "session-b"
 
-        manager._hooks["post_llm_call"][-1](**kwargs)
+        ctx.hooks["post_llm_call"](**kwargs)
 
         if lookup_mode == "mismatched_conversation":
             assert clone_ingests == [history]
@@ -1563,7 +1556,7 @@ def test_post_llm_hook_ignores_stale_registered_clone_after_rebind(monkeypatch, 
 
         if lookup_mode == "mismatched_conversation":
             clone_ingests.clear()
-            manager._hooks["post_llm_call"][-1](
+            ctx.hooks["post_llm_call"](
                 session_id="session-b",
                 platform="discord",
                 conversation_history=[{"role": "user", "content": "session only"}],
@@ -1575,14 +1568,9 @@ def test_post_llm_hook_ignores_stale_registered_clone_after_rebind(monkeypatch, 
 
 def test_post_llm_hook_prefers_active_lcm_clone(monkeypatch, tmp_path):
     module = _load_plugin_entrypoint_module("hermes_lcm_post_hook_active_clone")
-    manager = types.SimpleNamespace(_hooks={})
-    fake_plugins = types.SimpleNamespace(get_plugin_manager=lambda: manager)
-    fake_hermes_cli = types.SimpleNamespace(plugins=fake_plugins)
-    monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
-    monkeypatch.setitem(sys.modules, "hermes_cli.plugins", fake_plugins)
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes_home"))
 
-    class _CtxNoTool:
+    class _CtxNoTool(_HookContext):
         def __init__(self):
             self.engine = None
 
@@ -1611,7 +1599,7 @@ def test_post_llm_hook_prefers_active_lcm_clone(monkeypatch, tmp_path):
             self.ingested.append(list(history))
 
     active = _ActiveClone()
-    hook = manager._hooks["post_llm_call"][-1]
+    hook = ctx.hooks["post_llm_call"]
     history = [{"role": "user", "content": "discord lane canary"}]
 
     hook(
@@ -1638,14 +1626,9 @@ def test_post_llm_hook_prefers_active_lcm_clone(monkeypatch, tmp_path):
 
 def test_post_llm_hook_rebinds_legacy_singleton_between_gateway_lanes(monkeypatch, tmp_path):
     module = _load_plugin_entrypoint_module("hermes_lcm_post_hook_singleton_rebind")
-    manager = types.SimpleNamespace(_hooks={})
-    fake_plugins = types.SimpleNamespace(get_plugin_manager=lambda: manager)
-    fake_hermes_cli = types.SimpleNamespace(plugins=fake_plugins)
-    monkeypatch.setitem(sys.modules, "hermes_cli", fake_hermes_cli)
-    monkeypatch.setitem(sys.modules, "hermes_cli.plugins", fake_plugins)
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes_home"))
 
-    class _CtxNoTool:
+    class _CtxNoTool(_HookContext):
         def __init__(self):
             self.engine = None
 
@@ -1655,7 +1638,7 @@ def test_post_llm_hook_rebinds_legacy_singleton_between_gateway_lanes(monkeypatc
     ctx = _CtxNoTool()
     module.register(ctx)
     assert ctx.engine is not None
-    hook = manager._hooks["post_llm_call"][-1]
+    hook = ctx.hooks["post_llm_call"]
 
     ingests = []
 

@@ -402,12 +402,12 @@ def register(ctx):
     # registration (explicit qualified loads) and the installer's ordinary
     # profile skill link (normal discovery). Older hosts simply lack this
     # capability and keep their existing schema-driven behavior.
-    skill_root = Path(__file__).resolve().parent / "skills" / "hermes-lcm"
+    skill_root = Path(__file__).resolve().parent / "skills" / "hermes-lcm-ledger"
     register_skill = getattr(ctx, "register_skill", None)
     if callable(register_skill):
         try:
             register_skill(
-                "hermes-lcm",
+                "hermes-lcm-ledger",
                 skill_root / "SKILL.md",
                 description=(
                     "Use, configure, diagnose, and recall exact evidence "
@@ -555,9 +555,7 @@ def register(ctx):
     # receives conversation_history including the assistant response.  The
     # existing _ingest_messages cursor prevents duplicates if compress() runs
     # later the same turn.
-    try:
-        from hermes_cli.plugins import get_plugin_manager as _get_pm
-        _mgr = _get_pm()
+    if callable(register_hook):
 
         def _on_post_llm_call(**kwargs):
             history = kwargs.get("conversation_history")
@@ -598,11 +596,9 @@ def register(ctx):
                 )
                 active_engine.ingest(history)
             except Exception as exc:
-                logger.debug("LCM post_llm_call ingest error: %s", exc)
+                logger.warning("LCM post_llm_call ingest error: %s", exc)
 
-        _mgr._hooks.setdefault("post_llm_call", []).append(_on_post_llm_call)
+        register_hook("post_llm_call", _on_post_llm_call)
         logger.debug("LCM registered post_llm_call hook for per-turn ingest")
-    except Exception as exc:
-        logger.debug("LCM could not register post_llm_call hook: %s", exc)
 
     logger.info("LCM plugin loaded — lossless context management active")

@@ -16,7 +16,7 @@
       "3.13",
       "3.14"
     ],
-    "hermes_agent": ">=0.16,<1",
+    "hermes_agent": ">=0.23.4,<1",
     "optional_dependency_policy": "The supported version is the version resolved by a supported Hermes Agent host when the listed imported API is present. Hermes-LCM does not independently pin or install optional packages."
   },
   "runtime_scan": {
@@ -39,7 +39,7 @@
       "distribution": "hermes-agent",
       "availability": "required",
       "scope": "plugin-runtime",
-      "version_policy": "Hermes Agent >=0.16,<1",
+      "version_policy": "Hermes Agent >=0.23.4,<1",
       "imported_api": [
         "agent.context_engine.ContextEngine",
         "agent.auxiliary_client.call_llm",
@@ -59,7 +59,7 @@
       "distribution": "hermes-agent",
       "availability": "optional",
       "scope": "task-local slash-command session metadata",
-      "version_policy": "Hermes Agent >=0.16,<1; falls back to environment metadata when the module is absent",
+      "version_policy": "Hermes Agent >=0.23.4,<1; falls back to environment metadata when the module is absent",
       "imported_api": [
         "gateway.session_context.get_session_env"
       ]
@@ -68,7 +68,7 @@
       "distribution": "hermes-agent",
       "availability": "optional",
       "scope": "host home, provider routing, and plugin hook integration",
-      "version_policy": "Hermes Agent >=0.16,<1; each compatibility path has an explicit fallback",
+      "version_policy": "Hermes Agent >=0.23.4,<1; each compatibility path has an explicit fallback",
       "imported_api": [
         "hermes_cli.auth.PROVIDER_REGISTRY",
         "hermes_cli.config.get_hermes_home",

@@ -1,4 +1,4 @@
-# Tooling configuration for the hermes-lcm plugin.
+# Tooling configuration for the hermes-lcm-ledger plugin.
 #
 # This file pins lint settings so `ruff` behaves identically locally and in
 # CI. It intentionally declares no [build-system]: the plugin is installed via
@@ -9,12 +9,11 @@
 # workspace member. uv rejects a [project] table without `version`, so the
 # whole `uv lock` fails and the plugin gets dropped from the environment.
 # Without a build backend the member is metadata-only (virtual): Hermes
-# rewrites `name` to a per-profile key, and `version` is a placeholder that
-# never has to track plugin.yaml.
+# rewrites `name` to a per-profile key, and Ledger tracks its release version here.
 
 [project]
-name = "hermes-lcm"
-version = "0.0.0"
+name = "hermes-lcm-ledger"
+version = "0.1.0rc1"
 requires-python = ">=3.11"
 dependencies = []
 

@@ -10,38 +10,29 @@ This page holds the detailed install, activation, configuration, diagnostics, an
 
 ## Install
 
-Canonical install path: clone `hermes-lcm` as a general user plugin.
+From the Ledger checkout, install into the active Hermes profile:
 
 ```bash
-git clone https://github.com/stephenschoettler/hermes-lcm \
-  ~/.hermes/plugins/hermes-lcm
+hermes plugins install "file://$(pwd -P)" --ref "$(git rev-parse HEAD)"
 ```
 
-For a profile-specific install:
+For development, `./scripts/install.sh` links this checkout and its skill into
+the selected profile. Use just one installation method per profile.
 
-```bash
-git clone https://github.com/stephenschoettler/hermes-lcm \
-  ~/.hermes/profiles/myprofile/plugins/hermes-lcm
-```
-
-From an existing checkout, install a symlink:
-
-```bash
-./scripts/install.sh
-# Optional profile-aware install:
-HERMES_PROFILE=myprofile ./scripts/install.sh
-```
-
-The installer exposes both the plugin checkout and the bundled
-`skills/hermes-lcm` package in the matching global/profile skill tree. It is
-safe to run from a checkout already cloned into the canonical plugin path and
-refuses a conflicting plugin or skill path before creating either link.
+When switching from Hermes-LCM, stop all writers and take a consistent backup
+of the profile database and its external payload directory. Replace
+`hermes-lcm` in `plugins.enabled` with `hermes-lcm-ledger`. Carry over any
+plugin-specific settings and update monitoring that checks the plugin name.
+Keep `context.engine: lcm`, the existing `lcm:` settings, database and payload
+paths. Enable only one LCM implementation in a profile. To roll back, stop
+writers, restore the previous config and plugin, and restore the backup if the
+archive was damaged. Restoring an old snapshot discards later turns.
 
 ## Activate
 
 The plugin has two names:
 
-- plugin manifest name: `hermes-lcm`
+- plugin manifest name: `hermes-lcm-ledger`
 - runtime context engine name: `lcm`
 
 Both must be configured:
@@ -49,7 +40,7 @@ Both must be configured:
 ```yaml
 plugins:
   enabled:
-    - hermes-lcm
+    - hermes-lcm-ledger
 
 context:
   engine: lcm
@@ -59,23 +50,9 @@ Restart Hermes after changing plugin or context-engine config.
 
 ## Update
 
-If you cloned directly into the plugin directory:
-
-```bash
-cd ~/.hermes/plugins/hermes-lcm && git pull --ff-only
-```
-
-For a profile-specific install:
-
-```bash
-cd ~/.hermes/profiles/myprofile/plugins/hermes-lcm && git pull --ff-only
-```
-
-If you installed a symlink from a separate checkout:
-
-```bash
-./scripts/update.sh
-```
+For a managed installation, install the next reviewed commit from the same
+Ledger checkout using `hermes plugins install` with `--ref` and `--force`.
+For a development link, update the linked checkout.
 
 Restart Hermes after updating.
 
@@ -121,21 +98,21 @@ hermes plugins
 
 Expected signals:
 
-- plugin list includes `hermes-lcm`
+- plugin list includes `hermes-lcm-ledger`
 - selected context engine is `lcm`
 - tool list includes all 15 schemas: `lcm_grep`, `lcm_recall`,
   `lcm_query_state`, `lcm_compute`, `lcm_compile_evidence`,
   `lcm_evidence_pack`, `lcm_retrieve`, `lcm_recent`, `lcm_load_session`,
   `lcm_describe`, `lcm_expand`, `lcm_expand_query`, `lcm_status`, `lcm_inspect`,
   and `lcm_doctor`
-- ordinary skill discovery includes `hermes-lcm`; plugin-qualified explicit
-  loading is `hermes-lcm:hermes-lcm` on hosts that support plugin skills
+- ordinary skill discovery includes `hermes-lcm-ledger`; plugin-qualified explicit
+  loading is `hermes-lcm-ledger:hermes-lcm-ledger` on hosts that support plugin skills
 
 Typical output:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm v1.0.0-rc.1 (15 tools)
+  ✓ hermes-lcm-ledger v0.1.0-rc.1 (15 tools)
 
 Provider Plugins:
   Context Engine: lcm
@@ -150,13 +127,13 @@ The product-owned recall policy is injected through the host's ephemeral
 `pre_llm_call` user-context seam only after an LCM engine is bound to the
 session. It does not modify the system prompt or activate when another context
 engine is serving the turn. Its canonical file and digest source is
-`skills/hermes-lcm/references/recall-policy.md`.
+`skills/hermes-lcm-ledger/references/recall-policy.md`.
 
 ## Troubleshooting
 
 ### `hermes plugins` shows `lcm (not found)` but LCM tools exist
 
-If `plugins.enabled` contains `hermes-lcm`, `context.engine: lcm` is set, and
+If `plugins.enabled` contains `hermes-lcm-ledger`, `context.engine: lcm` is set, and
 the runtime exposes LCM tools, LCM is loaded. The `lcm (not found)` line is a
 Hermes host discovery/status mismatch, not an LCM storage or compaction failure.
 

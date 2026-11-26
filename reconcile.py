@@ -1031,7 +1031,7 @@ class ReconcileMixin:
         generated_surplus_skip_message_ids: set[int] = set()
         generated_placeholder_message_ids = getattr(
             self,
-            "_generated_ignored_active_replay_placeholder_message_ids",
+            "_generated_placeholder_messages",
             set(),
         )
         for identity, active_count in active_identity_counts.items():

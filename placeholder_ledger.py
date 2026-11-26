@@ -28,7 +28,17 @@ from .message_content import text_content_for_pattern_matching
 logger = logging.getLogger(__name__)
 
 
+class _GeneratedPlaceholder(dict):
+    """A replay message whose identity can be tracked until its last live use."""
+    __slots__ = ("__weakref__",)
+
+
 class PlaceholderLedgerMixin:
+    def _mark_generated_placeholder(self, message):
+        tracked = _GeneratedPlaceholder(message)
+        self._generated_placeholder_messages[id(tracked)] = tracked
+        return tracked
+
     @staticmethod
     def _is_volatile_ignored_quarantine_placeholder(msg: Dict[str, Any], text: str) -> bool:
         if str(msg.get("role") or "") != "assistant":
@@ -682,6 +692,5 @@ class PlaceholderLedgerMixin:
                 active_message = {"role": "user", "content": placeholder}
             digest = hashlib.sha256(original_text.encode("utf-8")).hexdigest()[:16]
             self._remember_generated_ignored_placeholder_hash(digest)
-            self._generated_ignored_active_replay_placeholder_message_ids.add(id(active_message))
-            active_replay_messages[idx] = active_message
+            active_replay_messages[idx] = self._mark_generated_placeholder(active_message)
         return active_replay_messages

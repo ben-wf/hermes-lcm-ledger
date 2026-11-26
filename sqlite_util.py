@@ -199,7 +199,7 @@ def _is_sqlite_locked_error(exc: BaseException) -> bool:
     return False
 
 
-def _sqlite_busy_timeout_ms(conn: Optional[sqlite3.Connection]) -> int:
+def _sqlite_busy_timeout_ms(conn: sqlite3.Connection | None) -> int:
     if conn is None:
         return 0
     row = conn.execute("PRAGMA busy_timeout").fetchone()

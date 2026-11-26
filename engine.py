@@ -16,6 +16,7 @@ import threading
 import time
 from collections import deque
 import uuid
+from weakref import WeakValueDictionary
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -599,7 +600,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         self._current_compress_placeholder_identity_counts: dict[tuple[str, str, str, str], int] = {}
         self._last_active_replay_source_identities: list[tuple[Any, ...]] = []
         self._last_active_replay_messages: list[Dict[str, Any]] = []
-        self._generated_ignored_active_replay_placeholder_message_ids: set[int] = set()
+        self._generated_placeholder_messages = WeakValueDictionary()
         self._logged_filter_config = False
         self._pending_reset_session_id: str = ""
         self._pending_reset_conversation_id: str = ""
@@ -4340,7 +4341,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         copied_replay_messages: list[Dict[str, Any]] = []
         generated_message_ids = getattr(
             self,
-            "_generated_ignored_active_replay_placeholder_message_ids",
+            "_generated_placeholder_messages",
             set(),
         )
         if source_messages is None and not generated_message_ids:
@@ -4356,7 +4357,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                         if val is not None:
                             copied_message[key] = val
             if id(message) in generated_message_ids:
-                self._generated_ignored_active_replay_placeholder_message_ids.add(id(copied_message))
+                copied_message = self._mark_generated_placeholder(copied_message)
             copied_replay_messages.append(copied_message)
         return copied_replay_messages
 
@@ -4565,7 +4566,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         redacted_replay_messages: list[Dict[str, Any]] = []
         generated_message_ids = getattr(
             self,
-            "_generated_ignored_active_replay_placeholder_message_ids",
+            "_generated_placeholder_messages",
             set(),
         )
         for message in messages:
@@ -4585,7 +4586,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                     parse_json_strings=True,
                 )
             if id(message) in generated_message_ids:
-                self._generated_ignored_active_replay_placeholder_message_ids.add(id(redacted_message))
+                redacted_message = self._mark_generated_placeholder(redacted_message)
             redacted_replay_messages.append(redacted_message)
         return redacted_replay_messages
 
@@ -4846,7 +4847,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                     boundary_ordinals = self._compression_boundary_active_placeholder_digest_ordinals
                     generated_message_ids = getattr(
                         self,
-                        "_generated_ignored_active_replay_placeholder_message_ids",
+                        "_generated_placeholder_messages",
                         set(),
                     )
                     has_generated_provenance = (

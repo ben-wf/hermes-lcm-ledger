@@ -745,6 +745,7 @@ def test_slow_knn_degrades_within_total_budget(semantic_engine, monkeypatch):
 def test_provider_resolution_is_bounded_and_does_not_start_query_or_fallback(
     semantic_engine, monkeypatch
 ):
+    release = threading.Event()
     semantic_engine._config.embedding_query_timeout_s = 0.02
     query_calls = 0
     fallback_calls = 0
@@ -756,7 +757,7 @@ def test_provider_resolution_is_bounded_and_does_not_start_query_or_fallback(
             return super().embed_query(text)
 
     def slow_resolve(_config):
-        time.sleep(0.1)
+        release.wait(3)
         return CountingProvider()
 
     def counted_full_text(_args, **_kwargs):
@@ -773,7 +774,8 @@ def test_provider_resolution_is_bounded_and_does_not_start_query_or_fallback(
         )
     )
 
-    assert time.monotonic() - started < 0.08
+    release.set()
+    assert time.monotonic() - started < 1.0
     assert payload["timeout"] is True
     assert payload["timeout_stage"] == "provider_resolution"
     assert query_calls == 0
@@ -869,7 +871,7 @@ def test_result_hydration_is_inside_request_deadline(semantic_engine, monkeypatc
     release = threading.Event()
 
     def blocking_get_node(_node_id):
-        release.wait(1.0)
+        release.wait(3)
         return None
 
     monkeypatch.setattr(lcm_tools, "VectorStore", OneResultStore)
@@ -882,7 +884,7 @@ def test_result_hydration_is_inside_request_deadline(semantic_engine, monkeypatc
                 {"query": "deadline", "mode": "semantic"}, engine=semantic_engine
             )
         )
-        assert time.monotonic() - started < 0.08
+        assert time.monotonic() - started < 1.0
         assert payload["timeout"] is True
         assert payload["timeout_stage"] == "result_resolution"
     finally:

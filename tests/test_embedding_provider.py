@@ -910,10 +910,11 @@ def test_voyage_document_splits_share_one_absolute_deadline(monkeypatch):
 
 
 def test_voyage_token_preprocessing_is_inside_absolute_deadline(monkeypatch):
+    release = threading.Event()
     monkeypatch.setenv("VOYAGE_API_KEY", "test-key")
 
     def slow_count(_text):
-        time.sleep(0.1)
+        release.wait(3)
         return 1
 
     monkeypatch.setattr(provider_mod, "count_tokens", slow_count)
@@ -924,7 +925,8 @@ def test_voyage_token_preprocessing_is_inside_absolute_deadline(monkeypatch):
     with pytest.raises(VoyageError, match="document preprocessing"):
         provider.embed_documents(["slow"])
 
-    assert time.monotonic() - started < 0.08
+    release.set()
+    assert time.monotonic() - started < 1.0
     assert transport.calls == []
 
 
@@ -1055,13 +1057,14 @@ def test_http_provider_does_not_decode_response_after_deadline(
 
 
 def test_voyage_slow_response_decode_is_inside_absolute_deadline(monkeypatch):
+    release = threading.Event()
     monkeypatch.setenv("VOYAGE_API_KEY", "test-key")
     decode_started = threading.Event()
     original_decode = provider_mod._response_json
 
     def slow_decode(*args, **kwargs):
         decode_started.set()
-        time.sleep(0.05)
+        release.wait(3)
         return original_decode(*args, **kwargs)
 
     monkeypatch.setattr(provider_mod, "_response_json", slow_decode)
@@ -1075,9 +1078,8 @@ def test_voyage_slow_response_decode_is_inside_absolute_deadline(monkeypatch):
 
     assert exc_info.value.kind == "timeout"
     assert decode_started.is_set()
-    assert time.monotonic() - started < 0.04
-    # Let the side-effect-free parser worker exit before monkeypatch teardown.
-    time.sleep(0.06)
+    release.set()
+    assert time.monotonic() - started < 1.0
 
 
 def test_voyage_slow_error_body_scrub_is_bounded_and_never_resent(monkeypatch):

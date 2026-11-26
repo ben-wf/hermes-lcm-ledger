@@ -12,6 +12,58 @@ Based on the [LCM paper](https://papers.voltropy.com/LCM) by Ehrlich & Blackman
 OpenClaw. For an interactive visualization of the LCM idea, see
 [losslesscontext.ai](https://losslesscontext.ai/).
 
+## Quick start
+
+LCM Ledger runs on Hermes Agent 0.23.4 or later in the 0.x series with Python
+3.14. If this profile already uses Hermes-LCM, follow the [migration steps](#switching-from-hermes-lcm) first.
+
+Install and enable the plugin from GitHub, then select its context engine in
+the same Hermes profile.
+
+```bash
+hermes plugins install ben-wf/hermes-lcm-ledger --enable
+hermes config set context.engine lcm
+```
+
+Start a new Hermes CLI session. If you run the gateway, let active turns
+finish and run `hermes gateway restart`. Check that Ledger is enabled and
+the profile selects `lcm`.
+
+```bash
+hermes plugins list --enabled --no-bundled
+hermes config get context.engine
+```
+
+In the new session, ask Hermes to run `lcm_status`. Its runtime identity
+shows the plugin name, version and database path. The first release
+candidate is **hermes-lcm-ledger v0.1.0-rc.1 (15 tools)**.
+
+### Updates
+
+For a standard GitHub installation, use the installed plugin name.
+
+```bash
+hermes plugins update hermes-lcm-ledger
+```
+
+If you installed with `--ref`, select the next commit explicitly. Replace
+`FULL_COMMIT_SHA` with its full 40-character Git SHA.
+
+```bash
+hermes plugins install ben-wf/hermes-lcm-ledger --force --ref FULL_COMMIT_SHA
+```
+
+Restart the CLI or gateway after updating.
+
+### Switching from Hermes-LCM
+
+1. Finish active turns and stop the gateway and any CLI sessions using the archive.
+2. Back up `lcm.db`, any `lcm.db-wal` and `lcm.db-shm` files, and the external payload directory together while writers are stopped.
+3. Run `hermes plugins disable hermes-lcm`, then install Ledger with the Quick Start commands. Keep the existing `lcm:` settings, engine key and storage paths. Move any `plugins.entries.hermes-lcm` settings to `plugins.entries.hermes-lcm-ledger` and update monitoring that checks the plugin name.
+4. Start Hermes again. Use `lcm_status` to check the database path and `lcm_expand` to retrieve a known archived message or external payload.
+
+For older upstream archives, see the [schema upgrade and rollback notes](docs/operator-guide.md#upgrade-from-v0200-or-v0210-rc2-to-v100-rc1).
+
 ## Table of contents
 
 - [What it does](#what-it-does)
@@ -111,128 +163,6 @@ through host-level history tools such as `session_search`.
 Position LCM around retrieval quality, autonomy, and drill-down behavior. Do not
 claim that Hermes core has no persisted record of pre-compression history.
 
-## Quick start
-
-### Prerequisites
-
-- Hermes Agent 0.23.4 or later in the 0.x series
-- Python 3.14
-- No required third-party runtime dependencies
-
-`tiktoken` is used if available; otherwise LCM falls back to character-based
-token estimates. `regex` is used if available to apply timeouts to message ignore
-patterns; without it, message-level regex filtering is disabled with a warning
-rather than running unbounded stdlib `re` matches.
-
-The versioned [host-owned dependency contract](docs/dependency-assurance.md)
-lists every shipped runtime import, supported host/Python versions, ownership,
-and the mechanical validation command. It is an assurance boundary, not a claim
-that the host's resolved environment is free of known vulnerabilities.
-
-### Install the plugin
-
-Install the public fork into the active Hermes profile:
-
-```bash
-hermes plugins install ben-wf/hermes-lcm-ledger
-```
-
-To install the exact commit of a local checkout:
-
-```bash
-hermes plugins install "file://$(pwd -P)" --ref "$(git rev-parse HEAD)"
-```
-
-For development, `./scripts/install.sh` links this checkout and its skill into
-the selected profile. Use just one installation method per profile.
-
-When switching from Hermes-LCM, stop all writers and take a consistent backup
-of the profile database and its external payload directory. Replace
-`hermes-lcm` in `plugins.enabled` with `hermes-lcm-ledger`. Carry over any
-plugin-specific settings and update monitoring that checks the plugin name.
-Keep `context.engine: lcm`, the existing `lcm:` settings, database and payload
-paths. Enable only one LCM implementation in a profile. To roll back, stop
-writers, restore the previous config and plugin, and restore the backup if the
-archive was damaged. Restoring an old snapshot discards later turns.
-
-### Activate it
-
-The plugin has two names:
-
-- plugin manifest name: `hermes-lcm-ledger`
-- runtime context engine name: `lcm`
-
-Both must be configured:
-
-```yaml
-plugins:
-  enabled:
-    - hermes-lcm-ledger
-
-context:
-  engine: lcm
-```
-
-Restart Hermes after changing plugin or context-engine config.
-
-### Verify it loaded
-
-Run:
-
-```bash
-hermes plugins
-```
-
-Expected signals:
-
-- plugin list includes `hermes-lcm-ledger`
-- selected context engine is `lcm`
-- tool list includes `lcm_grep`, `lcm_recall`, `lcm_recent`,
-  `lcm_load_session`, `lcm_describe`, `lcm_expand`, `lcm_expand_query`,
-  `lcm_status`, `lcm_inspect`, and `lcm_doctor`
-- the normal available-skills index includes `hermes-lcm-ledger`; current hosts can
-  also resolve the explicit plugin-qualified skill `hermes-lcm-ledger:hermes-lcm-ledger`
-
-Typical output:
-
-```text
-Plugins (1):
-  ✓ hermes-lcm-ledger v0.1.0-rc.1 (15 tools)
-
-Provider Plugins:
-  Context Engine: lcm
-```
-
-For source checkouts, `lcm_status`, `/lcm status`, `lcm_inspect`,
-`lcm_doctor`, and `/lcm doctor` also report the loaded plugin path and
-best-effort git identity:
-`plugin_git_commit`, `plugin_git_branch`, and `plugin_git_dirty`.
-
-If startup logs say LCM tools are available through `context-engine schemas` or
-mention the `Path B fallback`, that is expected on older Hermes hosts such as
-Hermes Agent v0.16. All 15 `lcm_*` tools remain available through the
-context-engine path; standalone plugin-registry registration is not required
-there.
-
-### Update it
-
-For a managed installation, install the next reviewed commit from the same
-Ledger checkout using `hermes plugins install` with `--ref` and `--force`.
-For a development link, update the linked checkout.
-
-Restart Hermes after updating.
-
-For the `v1.0.0-rc.1` line, take a normal backup of `lcm.db` before updating,
-then update the checkout and restart Hermes. No manual core migration or
-backfill is required: the core schema remains version 5. New assertion,
-query-view, and adaptive-retrieval state is additive, created only after the
-corresponding opt-in is enabled, and stored in the same profile database under
-named feature markers. The five new query/evidence tool schemas are visible in
-the tool list on stock installs, but automatic extraction, pre-answer evidence,
-assertion storage, query-view storage, and adaptive retrieval remain off. See
-[the operator upgrade and opt-in notes](docs/operator-guide.md#upgrade-from-v0200-or-v0210-rc2-to-v100-rc1)
-before enabling them.
-
 ## Commands and tools
 
 ### Agent tools
@@ -261,11 +191,10 @@ outside the LCM database.
 
 ## Recall skill and policy
 
-Hermes-LCM ships `skills/hermes-lcm-ledger/SKILL.md` plus progressive-disclosure
-references for configuration, architecture, diagnostics, recall routing, and
-session lifecycle. The installer links that directory into the active Hermes
-profile so it appears in ordinary skill discovery. On hosts with plugin skill
-registration, it is also available explicitly as `hermes-lcm-ledger:hermes-lcm-ledger`.
+LCM Ledger registers its bundled skill as
+`hermes-lcm-ledger:hermes-lcm-ledger`. It covers configuration, diagnostics,
+recall and session lifecycle. The [skill source](skills/hermes-lcm-ledger/SKILL.md)
+includes the detailed references.
 
 When LCM is the active context engine for a bound session, the plugin registers
 one deterministic `pre_llm_call` hook. Hermes injects the canonical policy into
@@ -794,6 +723,13 @@ exposes retrieval tools that can drill back into exact stored sources.
 - [Changelog](CHANGELOG.md)
 
 ## Development
+
+To test uncommitted changes in a separate development profile, run
+`HERMES_PROFILE=dev ./scripts/install.sh` from the checkout. This links the
+plugin and its skill into that profile. For packaged testing, install a
+committed revision into your test profile with
+`hermes plugins install "file://$(pwd -P)" --ref "$(git rev-parse HEAD)" --enable`.
+
 
 Important files:
 

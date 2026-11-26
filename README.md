@@ -229,12 +229,10 @@ without skill or hook registration keep their existing schema-driven behavior.
 
 ### Slash commands
 
-Slash commands are disabled by default. Enable them only in trusted operator
-contexts:
-
-```bash
-export LCM_ENABLE_SLASH_COMMAND=1
-```
+In Hermes Desktop, open **Settings → Plugins → hermes-lcm-ledger** and switch
+on **Enable /lcm commands** for a trusted operator profile. The switch defaults
+to off. Restart the CLI session or gateway to apply a change. Until a value
+is saved in the profile, Ledger uses `LCM_ENABLE_SLASH_COMMAND` if set.
 
 Available commands:
 
@@ -291,6 +289,27 @@ known-good rolling backup.
 ## Configuration
 
 Most installs only need `plugins.enabled` and `context.engine: lcm`.
+
+### Desktop settings
+
+Open **Settings → Plugins → hermes-lcm-ledger** in the target Hermes profile.
+The form covers compaction, models and timeouts, storage, filtering and redaction,
+retrieval, embeddings, maintenance and operator commands. An archive path change
+selects another SQLite file at the next start. To keep using the current archive,
+keep its path.
+
+Hermes saves edited fields under `plugins.entries.hermes-lcm-ledger.settings` in
+the profile configuration. Start a new Hermes process (restart the gateway for
+gateway sessions) to load the changes. An explicitly saved field takes priority
+over its `LCM_*` environment variable. For fields without a saved value, the form
+shows the built-in default. The running engine can inherit a different value from
+the environment or existing Hermes compression settings. Use `lcm_status` to
+inspect effective compaction settings. To return a field to inheritance, remove
+its key from the profile's Ledger settings.
+
+Enter lists as JSON arrays, for example `["batch-*", "cron-*"]` for excluded
+session patterns. The environment-variable equivalents below use comma-separated
+lists. Provider credentials stay in the Hermes credential configuration.
 
 ### Common settings
 
@@ -378,8 +397,9 @@ unknown names, source, and placeholder format without exposing raw secret values
 
 ### Threshold ownership
 
-When `context.engine: lcm` is active, `LCM_CONTEXT_THRESHOLD` is the compaction
-threshold LCM uses. Hermes core `compression.threshold` belongs to the built-in
+When `context.engine: lcm` is active, Ledger first uses a saved Desktop
+`context_threshold`, then `LCM_CONTEXT_THRESHOLD`, then `lcm.context_threshold`
+or the enabled Hermes compression threshold. Hermes core `compression.threshold` belongs to the built-in
 compressor. Hermes core `compression.enabled` is still the global gate that
 allows compaction, so leave it enabled when using LCM.
 

@@ -3,6 +3,495 @@ version: 0.1.0-rc.1
 requires_hermes: ">=0.23.4,<1"
 description: "Lossless Context Management — LCM Ledger archives turns in local SQLite and retrieves raw messages after compaction"
 author: "Benjamin Wittorf (fork), Stephen Schoettler and contributors (upstream)"
+config_schema:
+  enable_slash_command:
+    type: bool
+    label: Enable /lcm commands
+    description: Register the operator commands for this profile on the next Hermes start. Enable only in trusted operator contexts.
+    default: false
+  context_threshold:
+    type: float
+    label: "Context threshold"
+    description: "Fraction of the model context window that triggers compaction (e.g. 0.35 for 35%). Inherits the configured LCM or Hermes threshold until saved."
+    default: 0.35
+  fresh_tail_count:
+    type: int
+    label: "Protected recent messages"
+    description: "Keep this many recent messages available during compaction."
+    default: 32
+  fresh_tail_max_tokens:
+    type: int
+    label: "Protected tail token cap"
+    description: "Limit the size of the protected tail. Zero leaves it uncapped."
+    default: 0
+  leaf_chunk_tokens:
+    type: int
+    label: "Leaf chunk size (tokens)"
+    description: "Minimum raw backlog for a leaf summary and base target for dynamic chunks."
+    default: 20000
+  summary_model:
+    type: str
+    label: "Summary model"
+    description: "Model for compaction. Leave empty to use the Hermes auxiliary model."
+    default: ""
+  summary_fallback_models:
+    type: list
+    label: "Fallback summary models"
+    description: "JSON list of models to try in order when the primary route fails."
+    default: []
+  summary_timeout_ms:
+    type: int
+    label: "Summary timeout (ms)"
+    description: "Time allowed per summary call. Inherits the Hermes auxiliary compression timeout until explicitly configured."
+    default: 60000
+  new_session_retain_depth:
+    type: int
+    label: "Retention after /new"
+    description: "Summary depth to retain. Use -1 for all history, 0 for none, or a positive minimum depth."
+    default: 2
+  database_path:
+    type: str
+    label: "Archive database path"
+    description: "Leave empty for lcm.db in the Hermes profile. A different path selects a different archive on restart."
+    default: ""
+  incremental_max_depth:
+    type: int
+    label: "Maximum condensation depth"
+    description: "Use -1 for unlimited depth or 0 for leaf summaries only."
+    default: 3
+  condensation_fanin:
+    type: int
+    label: "Summaries per condensation"
+    description: "Number of summaries at one depth that trigger condensation."
+    default: 4
+  dynamic_leaf_chunk_enabled:
+    type: bool
+    label: "Dynamic leaf chunks"
+    description: "Compact the backlog in chunks sized according to backlog pressure."
+    default: false
+  dynamic_leaf_chunk_max:
+    type: int
+    label: "Maximum dynamic chunk (tokens)"
+    description: "Upper bound for each dynamic leaf chunk."
+    default: 40000
+  cache_friendly_condensation_enabled:
+    type: bool
+    label: "Cache-friendly condensation"
+    description: "Defer follow-up condensation until sufficient debt or context pressure accumulates."
+    default: false
+  cache_friendly_min_debt_groups:
+    type: int
+    label: "Minimum pending groups"
+    description: "Number of complete groups needed to allow a cache-friendly condensation pass."
+    default: 2
+  deferred_maintenance_enabled:
+    type: bool
+    label: "Deferred maintenance"
+    description: "Carry pending compaction work into later turns."
+    default: false
+  deferred_maintenance_max_passes:
+    type: int
+    label: "Maximum catch-up passes"
+    description: "Maximum extra leaf passes per catch-up turn."
+    default: 4
+  critical_budget_pressure_ratio:
+    type: float
+    label: "Critical context pressure"
+    description: "Context-window fraction at which deferred work may run immediately. Zero disables the bypass."
+    default: 0.0
+  threshold_full_sweep_enabled:
+    type: bool
+    label: "Full sweep at threshold"
+    description: "Run one bounded synchronous sweep when context reaches the compaction threshold."
+    default: false
+  summary_prefix_target_tokens:
+    type: int
+    label: "Sweep summary target (tokens)"
+    description: "Target size of the summary prefix after a sweep. Zero uses the leaf chunk budget."
+    default: 0
+  l2_budget_ratio:
+    type: float
+    label: "Level 2 summary budget ratio"
+    description: "Token budget for a bullet summary as a fraction of the level 1 budget."
+    default: 0.5
+  l3_truncate_tokens:
+    type: int
+    label: "Level 3 truncation limit (tokens)"
+    description: "Maximum size of a deterministic fallback summary."
+    default: 512
+  max_assembly_tokens:
+    type: int
+    label: "Maximum active context (tokens)"
+    description: "Hard cap for assembled context. Zero disables this cap."
+    default: 0
+  reserve_tokens_floor:
+    type: int
+    label: "Reserved context (tokens)"
+    description: "Leave this much space in the model window during assembly. Zero disables the reservation."
+    default: 0
+  custom_instructions:
+    type: str
+    label: "Summary instructions"
+    description: "Additional instructions included in every summarization prompt."
+    default: ""
+  summary_circuit_breaker_failure_threshold:
+    type: int
+    label: "Summary route failure limit"
+    description: "Consecutive failures before temporarily skipping a summary route."
+    default: 2
+  summary_circuit_breaker_cooldown_seconds:
+    type: int
+    label: "Summary route cooldown (s)"
+    description: "Delay before retrying a skipped summary route."
+    default: 300
+  summary_spend_max_calls:
+    type: int
+    label: "Summary calls per window"
+    description: "Maximum calls before using deterministic truncation. Zero disables the guard."
+    default: 24
+  summary_spend_window_seconds:
+    type: float
+    label: "Summary call window (s)"
+    description: "Sliding window over which summary calls are counted."
+    default: 600.0
+  summary_spend_backoff_seconds:
+    type: float
+    label: "Summary call backoff (s)"
+    description: "Time to wait after exhausting the summary call budget."
+    default: 1800.0
+  expansion_model:
+    type: str
+    label: "Expansion model"
+    description: "Model for lcm_expand_query. Empty uses the summary or Hermes auxiliary model."
+    default: ""
+  expansion_context_tokens:
+    type: int
+    label: "Expansion context budget (tokens)"
+    description: "Maximum source context sent to the expansion model."
+    default: 32000
+  expansion_timeout_ms:
+    type: int
+    label: "Expansion timeout (ms)"
+    description: "Time allowed per lcm_expand_query synthesis call."
+    default: 120000
+  ignore_session_patterns:
+    type: list
+    label: "Excluded session patterns"
+    description: "JSON list of session globs. Matching sessions are excluded from storage."
+    default: []
+  stateless_session_patterns:
+    type: list
+    label: "Read-only session patterns"
+    description: "JSON list of session globs allowed to read carried-over state without recording new data."
+    default: []
+  ignore_message_patterns:
+    type: list
+    label: "Excluded message patterns"
+    description: "JSON list of regular expressions. Matching message content is skipped before storage."
+    default: []
+  sensitive_patterns_enabled:
+    type: bool
+    label: "Redact sensitive content"
+    description: "Apply the selected sensitive patterns before storage, indexing and summarization."
+    default: false
+  sensitive_patterns:
+    type: list
+    label: "Redaction patterns"
+    description: "JSON list of built-in pattern names, such as api_key or bearer_token."
+    default: ["api_key", "bearer_token", "password_assignment", "private_key"]
+  large_output_externalization_enabled:
+    type: bool
+    label: "Store large outputs in files"
+    description: "Write oversized payloads to plugin-managed files and retain references."
+    default: false
+  large_output_externalization_path:
+    type: str
+    label: "Large output directory"
+    description: "Leave empty for the default directory under the Hermes profile."
+    default: ""
+  large_output_externalization_threshold_chars:
+    type: int
+    label: "Large output threshold (characters)"
+    description: "Minimum normalized payload size for storing an output in a file."
+    default: 12000
+  large_output_active_replay_stubbing_enabled:
+    type: bool
+    label: "Use references in active replay"
+    description: "Replace eligible large tool results in model input with recoverable references. Requires file storage for large outputs."
+    default: false
+  large_output_active_replay_stub_threshold_tokens:
+    type: int
+    label: "Replay reference threshold (tokens)"
+    description: "Token threshold for replacing a textual tool result during active replay."
+    default: 25000
+  large_output_transcript_gc_enabled:
+    type: bool
+    label: "Compact archived tool rows"
+    description: "Rewrite tool results already summarized and stored in files as compact references."
+    default: false
+  extraction_enabled:
+    type: bool
+    label: "Extract decisions before compaction"
+    description: "Write decisions and commitments to extraction files before summarization."
+    default: false
+  extraction_model:
+    type: str
+    label: "Extraction model"
+    description: "Empty uses the summary model."
+    default: ""
+  extraction_output_path:
+    type: str
+    label: "Extraction directory"
+    description: "Directory for daily extraction files. Empty uses the profile default."
+    default: ""
+  assertions_enabled:
+    type: bool
+    label: "Store assertions"
+    description: "Create assertion tables in the archive for structured evidence."
+    default: false
+  assertion_extraction_enabled:
+    type: bool
+    label: "Extract assertions"
+    description: "Enable model-based extraction of structured assertions from source rows."
+    default: false
+  assertion_extraction_model:
+    type: str
+    label: "Assertion extraction model"
+    description: "Empty uses the extraction model, then the summary model."
+    default: ""
+  assertion_extraction_max_sources_per_pass:
+    type: int
+    label: "Assertion sources per pass"
+    description: "Maximum sources per pre-compaction batch, from 1 to 8."
+    default: 4
+  assertion_extraction_timeout_seconds:
+    type: float
+    label: "Assertion extraction timeout (s)"
+    description: "Time allowed per source call, from 0.1 to 120 seconds."
+    default: 30.0
+  query_views_enabled:
+    type: bool
+    label: "Store query evidence views"
+    description: "Keep reusable query evidence in the profile database."
+    default: false
+  adaptive_retrieval_enabled:
+    type: bool
+    label: "Adaptive retrieval"
+    description: "Enable the bounded single-turn retrieval controller and reusable evidence views."
+    default: false
+  embeddings_enabled:
+    type: bool
+    label: "Enable embeddings"
+    description: "Use the configured embedding provider and model for vector search."
+    default: false
+  embedding_provider:
+    type: str
+    label: "Embedding provider"
+    description: "Provider used to generate embeddings."
+    default: ""
+  embedding_model:
+    type: str
+    label: "Embedding model"
+    description: "Model identifier passed to the embedding provider."
+    default: ""
+  ollama_base_url:
+    type: str
+    label: "Ollama base URL"
+    description: "Base URL of the Ollama service for local embeddings."
+    default: "http://localhost:11434"
+  embedding_content_policy:
+    type: str
+    label: "Content to embed"
+    description: "Choose how much raw conversation and tool content to include in chunks."
+    default: "conversational"
+    choices: ["conversational", "heads", "full"]
+  embedding_storage_dtype:
+    type: str
+    label: "Vector storage format"
+    description: "Precision for newly registered embedding profiles. Existing vectors keep their original format."
+    default: "float32"
+    choices: ["float32", "int8"]
+  embedding_store_dim:
+    type: int
+    label: "Stored vector dimensions"
+    description: "Store the leading dimensions of each new vector. Zero keeps the full dimension."
+    default: 0
+  embedding_binary_prescreen:
+    type: bool
+    label: "Binary prescreen for float32"
+    description: "Store sign bits for a two-stage nearest-neighbor search on new float32 profiles."
+    default: false
+  knn_prescreen_multiplier:
+    type: int
+    label: "Prescreen candidate multiplier"
+    description: "Number of candidates rescored for each requested nearest neighbor."
+    default: 4
+  embedding_bounded_scan_rows:
+    type: int
+    label: "Bounded vector search rows"
+    description: "Maximum recent vectors for bounded search."
+    default: 2000
+  embedding_query_timeout_s:
+    type: float
+    label: "Embedding query timeout (s)"
+    description: "Deadline for generating a query embedding."
+    default: 3.0
+  embedding_backfill_timeout_s:
+    type: float
+    label: "Embedding backfill timeout (s)"
+    description: "Deadline for a provider call while backfilling document embeddings."
+    default: 120.0
+  embedding_max_batch_items:
+    type: int
+    label: "Maximum embedding batch size"
+    description: "Maximum documents sent in one provider request."
+    default: 1000
+  embedding_query_spend_max_calls:
+    type: int
+    label: "Query embedding calls per window"
+    description: "Maximum query embedding calls per spend window. Zero disables the guard."
+    default: 600
+  embedding_query_spend_window_seconds:
+    type: float
+    label: "Query embedding call window (s)"
+    description: "Sliding window over which query embedding calls are counted."
+    default: 60.0
+  embedding_query_spend_backoff_seconds:
+    type: float
+    label: "Query embedding backoff (s)"
+    description: "Delay after exhausting the query embedding call budget."
+    default: 60.0
+  rerank_enabled:
+    type: bool
+    label: "Rerank recall results"
+    description: "Send top recall candidates to the reranking provider. This can incur a provider charge."
+    default: false
+  recall_query_timeout_s:
+    type: float
+    label: "Recall query timeout (s)"
+    description: "Time budget for the full hybrid recall query."
+    default: 8.0
+  recall_scan_rows:
+    type: int
+    label: "Recall scan batch size"
+    description: "Vectors held in memory per batch during a recall scan."
+    default: 25000
+  recall_scan_max_rows:
+    type: int
+    label: "Maximum recall scan rows"
+    description: "Hard cap per scan. Zero searches the whole corpus."
+    default: 0
+  recall_scan_budget_s:
+    type: float
+    label: "Recall scan time budget (s)"
+    description: "Stop between batches when this time expires. Zero disables the limit."
+    default: 0.0
+  recall_arm_weights:
+    type: dict
+    label: "Hybrid recall weights"
+    description: "JSON object with nonnegative weights for fts, summary and chunk. Zero drops that source."
+    default: {"fts": 0.5, "summary": 1.0, "chunk": 1.0}
+  recall_reference_strict:
+    type: bool
+    label: "Require source spans for recall"
+    description: "Deliver only citable hits in answer-ready results."
+    default: true
+  proactive_recall_enabled:
+    type: bool
+    label: "Proactive recall"
+    description: "Search previous sessions using the newest user message and include relevant memories in the active context."
+    default: false
+  proactive_recall_min_score:
+    type: float
+    label: "Proactive recall minimum score"
+    description: "Minimum composite score accepted for automatic injection. Reranking changes the score scale."
+    default: 0.01
+  proactive_recall_budget_tokens:
+    type: int
+    label: "Proactive recall budget (tokens)"
+    description: "Maximum size of automatically added memories."
+    default: 500
+  proactive_recall_provider:
+    type: str
+    label: "Proactive recall provider"
+    description: "Optional embedding provider for automatic recall. Empty uses the main provider."
+    default: ""
+  preanswer_evidence_enabled:
+    type: bool
+    label: "Check evidence before answering"
+    description: "Enable automatic evidence validation before the model call."
+    default: false
+  preanswer_evidence_mode:
+    type: str
+    label: "Pre-answer evidence mode"
+    description: "Choose the evidence policy. Empty uses the legacy selective policy when evidence checking is enabled."
+    default: ""
+    choices: ["", "off", "legacy_selective", "requirements_v1"]
+  selective_compiler_enabled:
+    type: bool
+    label: "Selective evidence compiler"
+    description: "Enable model-assisted selection of supported evidence operations."
+    default: false
+  selective_compiler_model:
+    type: str
+    label: "Evidence compiler model"
+    description: "Model to use for the selective evidence compiler."
+    default: ""
+  fts_integrity_check_interval_hours:
+    type: float
+    label: "Full-text index check interval (h)"
+    description: "Hours between deep startup checks. Zero checks every startup. A negative value skips scheduled deep checks."
+    default: 24.0
+  doctor_clean_apply_enabled:
+    type: bool
+    label: "Allow doctor cleanup"
+    description: "Permit the destructive /lcm doctor clean apply command in trusted operator sessions."
+    default: false
+  empty_lifecycle_gc_enabled:
+    type: bool
+    label: "Prune empty session records"
+    description: "Automatically prune old lifecycle rows with no messages or summary nodes."
+    default: true
+  empty_lifecycle_gc_threshold:
+    type: int
+    label: "Lifecycle cleanup threshold"
+    description: "Minimum lifecycle row count before automatic cleanup runs."
+    default: 200
+  empty_lifecycle_gc_max_age_hours:
+    type: float
+    label: "Minimum lifecycle record age (h)"
+    description: "Minimum age of an empty session before automatic deletion. Zero permits immediate cleanup."
+    default: 24.0
+  temporal_rollups_enabled:
+    type: bool
+    label: "Build temporal summaries"
+    description: "Enable time-based summaries during maintenance."
+    default: false
+  rollup_daily_target_tokens:
+    type: int
+    label: "Daily summary target (tokens)"
+    description: "Target length for daily rollups."
+    default: 5000
+  rollup_daily_max_tokens:
+    type: int
+    label: "Daily summary limit (tokens)"
+    description: "Maximum size for a daily rollup."
+    default: 15000
+  rollup_aggregate_max_tokens:
+    type: int
+    label: "Aggregate summary limit (tokens)"
+    description: "Maximum size for higher-level rollups."
+    default: 20000
+  rollup_builds_per_pass:
+    type: int
+    label: "Rollups per maintenance pass"
+    description: "Maximum rollups to build in one pass."
+    default: 2
+  rollup_maintenance_budget_ms:
+    type: int
+    label: "Rollup maintenance budget (ms)"
+    description: "Time budget checked between builds. An in-progress build can finish after the deadline."
+    default: 5000
 provides_tools:
   - lcm_grep
   - lcm_recall

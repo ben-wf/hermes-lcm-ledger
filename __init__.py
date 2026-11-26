@@ -528,7 +528,11 @@ def register(ctx):
         )
 
     register_command = getattr(ctx, "register_command", None)
-    slash_enabled = _env_flag_enabled("LCM_ENABLE_SLASH_COMMAND", default=False)
+    get_config = getattr(ctx, "get_config", None)
+    slash_setting = get_config("enable_slash_command", None) if callable(get_config) else None
+    slash_enabled = (
+        slash_setting if isinstance(slash_setting, bool) else _env_flag_enabled("LCM_ENABLE_SLASH_COMMAND")
+    )
     if callable(register_command) and slash_enabled:
         from .command import handle_lcm_command
 
@@ -542,7 +546,7 @@ def register(ctx):
             description="LCM status and diagnostics",
         )
     elif callable(register_command):
-        logger.info("LCM slash command registration disabled (set LCM_ENABLE_SLASH_COMMAND=1 to enable /lcm)")
+        logger.info("LCM slash command registration disabled for this profile")
     else:
         logger.info("LCM slash command registration unavailable on this Hermes host; continuing without /lcm")
 

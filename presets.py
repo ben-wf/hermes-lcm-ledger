@@ -197,6 +197,14 @@ def _current_config_value(config: Any, field: str) -> Any:
     return getattr(config, field, "(unknown)")
 
 
+def _saved_preset_fields(config: Any) -> dict[str, Any]:
+    sources = getattr(config, "config_sources", {}) or {}
+    return {
+        field: getattr(config, field)
+        for field in _PRESET_FIELDS if sources.get(field) == "plugin_settings"
+    }
+
+
 def preset_match_confidence(engine: Any, preset: LCMPreset | None = None) -> str:
     """Return an honest confidence label for the dry-run recommendation."""
 
@@ -251,10 +259,13 @@ def preset_env_diff(
     env = environ if environ is not None else os.environ
     explicit = explicit_operator_overrides(env)
     invalid = invalid_operator_overrides(env)
+    saved = _saved_preset_fields(config)
     lines: list[str] = []
     for field, value in preset.runtime_env.items():
         env_var = _FIELD_ENV[field]
-        if field in explicit:
+        if field in saved:
+            lines.append(f"{env_var}: keep plugin setting {saved[field]} (preset {value})")
+        elif field in explicit:
             current = _parse_override_value(field, env[env_var])
             lines.append(f"{env_var}: keep explicit value {current} (preset {value})")
         elif field in invalid:
@@ -292,16 +303,17 @@ def _preset_dry_run_delta(
     env = environ if environ is not None else os.environ
     explicit = explicit_operator_overrides(env)
     invalid = invalid_operator_overrides(env)
+    saved = _saved_preset_fields(config)
     delta: list[dict[str, Any]] = []
     for field, preset_value in preset.runtime_env.items():
         env_var = _FIELD_ENV[field]
         current = _current_config_value(config, field)
-        if field in explicit:
+        if field in explicit or field in saved:
             delta.append({
                 "field": field,
                 "env": env_var,
                 "action": "keep_explicit",
-                "current_value": _parse_override_value(field, env[env_var]),
+                "current_value": saved[field] if field in saved else _parse_override_value(field, env[env_var]),
                 "preset_value": preset_value,
             })
         elif field in invalid:
@@ -357,6 +369,9 @@ def preset_status_payload(
         }
         for field, env_var in explicit.items()
     }
+    saved = _saved_preset_fields(config)
+    for field, value in saved.items():
+        explicit_payload[field] = {"source": "plugin_settings", "value": value}
     invalid_payload = {
         field: {
             "env": env_var,
@@ -368,7 +383,7 @@ def preset_status_payload(
                 else {}
             ),
         }
-        for field, env_var in invalid.items()
+        for field, env_var in invalid.items() if field not in saved
     }
 
     payload: dict[str, Any] = {

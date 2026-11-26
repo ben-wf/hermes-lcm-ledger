@@ -920,6 +920,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
             else "manual_or_default"
         )
         explicit_lcm_override = source in {
+            "plugin_settings",
             "env:LCM_CONTEXT_THRESHOLD",
             "config_yaml:lcm.context_threshold",
         }

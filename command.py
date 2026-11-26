@@ -38,12 +38,11 @@ from .ingest_protection import (
 )
 from .dag import SummaryDAG, build_nodes_fts_spec
 from .presets import (
-    explicit_operator_overrides,
     get_preset,
-    invalid_operator_overrides,
     preset_confidence_reasons,
     preset_env_diff,
     preset_match_confidence,
+    preset_status_payload,
     shipped_presets,
     suggest_preset_for_engine,
     unsupported_runtime_fields_text,
@@ -2223,18 +2222,21 @@ def _preset_suggest_text(engine) -> str:
         ])
         return "\n".join(lines)
 
-    explicit = explicit_operator_overrides()
-    invalid = invalid_operator_overrides()
+    status = preset_status_payload(engine)
+    explicit_labels = sorted(
+        item.get("env") or f"plugin_settings.{field}"
+        for field, item in status["explicit_overrides"].items()
+    )
     invalid_text = ", ".join(
-        f"{env_var}={os.environ.get(env_var, '')}" for env_var in sorted(invalid.values())
-    ) if invalid else "(none)"
+        f"{item['env']}={item['value']}" for item in status["invalid_overrides"].values()
+    ) or "(none)"
     lines.extend([
         f"suggested_preset: {preset.name}",
         f"reason: {reason}",
         f"match_confidence: {preset_match_confidence(engine, preset)}",
         f"policy_version: {preset.policy_version}",
         f"benchmark_version: {preset.provenance.get('benchmark_version', '(unknown)')}",
-        "explicit_overrides: " + (", ".join(sorted(explicit.values())) if explicit else "(none)"),
+        "explicit_overrides: " + (", ".join(explicit_labels) or "(none)"),
         f"invalid_overrides: {invalid_text}",
         "confidence_reasons:",
     ])

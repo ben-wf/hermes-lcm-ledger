@@ -1,5 +1,6 @@
 """LCM configuration with defaults and env var overrides."""
 import logging
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -197,6 +198,27 @@ def _load_hermes_config_yaml() -> dict[str, Any]:
                 parsed = value
         parent[key] = parsed
     return root
+
+
+def _ledger_settings() -> dict[str, Any]:
+    """Use the same resolved profile as the Desktop settings writer."""
+    try:
+        from hermes_cli.config import load_config_readonly
+    except ImportError:
+        profile = _load_hermes_config_yaml()
+    else:
+        profile = load_config_readonly() or {}
+    entry = profile
+    for key in ("plugins", "entries", "hermes-lcm-ledger"):
+        entry = entry.get(key) if isinstance(entry, dict) else None
+    if not isinstance(entry, dict):
+        return {}
+    result = {}
+    for key in ("config", "settings"):
+        values = entry.get(key)
+        if isinstance(values, dict):
+            result.update(values)
+    return result
 
 
 _SUPPORTED_LCM_CONFIG_YAML_KEYS = {"context_threshold"}
@@ -887,4 +909,58 @@ class LCMConfig:
 
         c.config_sources = config_sources
         c.config_source_warnings = config_source_warnings
+        c._apply_profile_settings(_ledger_settings())
         return c
+
+    def _apply_profile_settings(self, settings: dict[str, Any]) -> None:
+        for key, raw in settings.items():
+            expected = PROFILE_FIELD_TYPES.get(key)
+            if expected is None:
+                continue
+            try:
+                value = _profile_value(key, raw, expected)
+            except (ValueError, OverflowError):
+                self.config_source_warnings.append(f"invalid plugin setting {key} ignored")
+                continue
+            setattr(self, key, value)
+            self.config_sources[key] = "plugin_settings"
+            if key in _PATTERN_SOURCE_FIELDS:
+                setattr(self, f"{key}_source", "plugin_settings")
+
+
+_PATTERN_SOURCE_FIELDS = {
+    "sensitive_patterns", "ignore_session_patterns", "stateless_session_patterns",
+    "ignore_message_patterns",
+}
+PROFILE_FIELD_TYPES = {
+    **{spec.name: spec.py_type for spec in ENV_FIELD_SPECS},
+    **dict.fromkeys(_PATTERN_SOURCE_FIELDS, list),
+    "summary_fallback_models": list,
+    "recall_arm_weights": dict,
+    "empty_lifecycle_gc_max_age_hours": float,
+}
+
+
+def _profile_value(key: str, raw: Any, expected: type) -> Any:
+    if expected is float:
+        if type(raw) not in (int, float) or not math.isfinite(raw):
+            raise ValueError(key)
+        if key == "context_threshold" and not 0 < raw <= 1:
+            raise ValueError(key)
+        return float(raw)
+    if type(raw) is not expected:
+        raise ValueError(key)
+    if expected is list:
+        if not all(isinstance(item, str) for item in raw):
+            raise ValueError(key)
+        return list(raw)
+    if expected is dict:
+        weights = dict(_DEFAULT_RECALL_ARM_WEIGHTS)
+        for arm, weight in raw.items():
+            if arm not in weights or type(weight) not in (float, int) or not math.isfinite(weight) or weight < 0:
+                raise ValueError(key)
+            weights[arm] = float(weight)
+        return weights
+    if key == "fresh_tail_max_tokens":
+        return max(0, raw)
+    return raw

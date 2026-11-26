@@ -91,6 +91,8 @@ def _register_plugin_with_command(
     tmp_path,
     module_name: str,
     session_values: dict[str, str],
+    settings=None,
+    env_flag="1",
 ):
     """Register the plugin against a host-shaped slash-command context."""
     manager = types.SimpleNamespace(_hooks={})
@@ -105,7 +107,7 @@ def _register_plugin_with_command(
     monkeypatch.setitem(sys.modules, "gateway", fake_gateway)
     monkeypatch.setitem(sys.modules, "gateway.session_context", fake_session_context)
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / module_name))
-    monkeypatch.setenv("LCM_ENABLE_SLASH_COMMAND", "1")
+    monkeypatch.setenv("LCM_ENABLE_SLASH_COMMAND", env_flag)
 
     module = _load_plugin_entrypoint_module(module_name)
 
@@ -117,12 +119,27 @@ def _register_plugin_with_command(
         def register_context_engine(self, engine):
             self.engine = engine
 
+        def get_config(self, key, default=None):
+            return (settings or {}).get(key, default)
+
         def register_command(self, name, handler, description=""):
             self.commands[name] = handler
 
     ctx = _Ctx()
     module.register(ctx)
     return ctx
+
+
+def test_slash_command_uses_saved_profile_setting_before_environment(monkeypatch, tmp_path):
+    for setting, env_flag in [(True, "0"), (False, "1")]:
+        ctx = _register_plugin_with_command(
+            monkeypatch, tmp_path, f"ledger_profile_setting_{setting}", {},
+            settings={"enable_slash_command": setting}, env_flag=env_flag,
+        )
+        try:
+            assert ("lcm" in ctx.commands) is setting
+        finally:
+            ctx.engine.shutdown()
 
 
 def _slash_status_fields(text: str) -> dict[str, str]:

@@ -2482,6 +2482,11 @@ def _integrity_check_interval_hours() -> float:
     ``0`` checks on every startup (previous behavior); a negative value never
     checks on startup (relies on structural checks + LIKE fallback + doctor).
     """
+    from .config import _ledger_settings
+
+    setting = _ledger_settings().get("fts_integrity_check_interval_hours")
+    if type(setting) in (float, int) and math.isfinite(setting):
+        return float(setting)
     raw = os.environ.get(INTEGRITY_CHECK_INTERVAL_ENV)
     if raw is None:
         return DEFAULT_INTEGRITY_CHECK_INTERVAL_HOURS

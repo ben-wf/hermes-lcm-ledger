@@ -880,33 +880,25 @@ def test_query_path_rate_limit_surfaces_typed_reason(monkeypatch):
 def test_voyage_document_splits_share_one_absolute_deadline(monkeypatch):
     monkeypatch.setenv("VOYAGE_API_KEY", "test-key")
     monkeypatch.setattr(provider_mod, "count_tokens", lambda _text: 1)
-    calls: list[float] = []
+    now = 100.0
+    monkeypatch.setattr(provider_mod, "time", SimpleNamespace(monotonic=lambda: now, time=time.time))
+    timeouts = []
 
     def transport(**kwargs):
-        timeout = float(kwargs["timeout"])
-        calls.append(timeout)
-        delay = 0.015
-        if timeout < delay:
-            time.sleep(max(0.0, timeout))
+        nonlocal now
+        timeout = kwargs["timeout"]
+        timeouts.append(timeout)
+        request_duration = 15.0
+        now += min(timeout, request_duration)
+        if timeout < request_duration:
             raise TimeoutError("request exceeded remaining budget")
-        time.sleep(delay)
         return _voyage_success(1, dim=2)
 
-    provider = VoyageProvider(
-        "voyage-test",
-        transport=transport,
-        timeout=0.02,
-        max_batch_items=1,
-        sleeper=lambda _delay: None,
-    )
-    started = time.monotonic()
+    provider = VoyageProvider("voyage-test", transport=transport, timeout=20.0, max_batch_items=1)
     with pytest.raises(VoyageError, match="(network error|deadline exceeded)"):
         provider.embed_documents(["first", "second"])
-    elapsed = time.monotonic() - started
-    assert 1 <= len(calls) <= 2
-    if len(calls) == 2:
-        assert calls[1] < calls[0]
-    assert elapsed < 0.06
+
+    assert timeouts == [20.0, 5.0]
 
 
 def test_voyage_token_preprocessing_is_inside_absolute_deadline(monkeypatch):

@@ -3,7 +3,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
-RELEASE_VERSION = "0.1.0-rc.2"
+RELEASE_VERSION = "1.0.0"
 RELEASE_NOTES = REPO_ROOT / ".github" / "release-notes" / f"v{RELEASE_VERSION}.md"
 
 
@@ -24,7 +24,7 @@ def test_release_workflow_marks_rc_tags_as_prereleases_not_latest():
     assert "draft: false" in workflow
 
 
-def test_release_candidate_identity_surfaces_are_synchronized():
+def test_release_identity_surfaces_are_synchronized():
     manifest = (REPO_ROOT / "plugin.yaml").read_text(encoding="utf-8")
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
     operator_guide = (REPO_ROOT / "docs" / "operator-guide.md").read_text(
@@ -91,7 +91,7 @@ def test_preanswer_guide_discloses_inherited_embedding_provider_behavior():
     assert "Pre-answer evidence alone remains provider-free." not in operator_guide
 
 
-def test_release_candidate_notes_cover_only_the_merged_release_scope():
+def test_release_notes_identify_the_fork_and_archive():
     notes = RELEASE_NOTES.read_text(encoding="utf-8")
 
     assert notes.startswith(f"# hermes-lcm-ledger v{RELEASE_VERSION}\n")

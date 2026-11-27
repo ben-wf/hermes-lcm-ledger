@@ -2,6 +2,17 @@
 
 This repo also publishes GitHub Releases. This file is the repo-root release surface for operators who want the recent release arc without leaving the checkout.
 
+## v1.0.0 - 2026-11-27
+
+First stable release of LCM Ledger. It promotes the RC2 runtime and archive
+format. Existing Ledger users can upgrade in place with the same `lcm.db`,
+profile settings and `lcm` context engine.
+
+In a 7.5 GB synthetic archive on Apple Silicon, 489 lookups during online
+backups returned all 4,942 expected source excerpts with the default
+eight-second recall budget. All six backups passed the restore checks.
+[Release notes](https://github.com/ben-wf/hermes-lcm-ledger/releases/tag/v1.0.0)
+
 ## v0.1.0-rc.2 - 2026-11-27
 
 - Publish a leaf summary and its restart checkpoint together. Context assembly discovers all summary depths in long sessions.

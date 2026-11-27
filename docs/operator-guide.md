@@ -118,7 +118,7 @@ Typical output:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm-ledger v0.1.0-rc.2 (15 tools)
+  ✓ hermes-lcm-ledger v1.0.0 (15 tools)
 
 Provider Plugins:
   Context Engine: lcm

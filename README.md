@@ -48,12 +48,13 @@ hermes config get context.engine
 ```
 
 In the new session, ask Hermes to run `lcm_status`. Its runtime identity
-shows the plugin name, version and database path. The first release
-candidate is **hermes-lcm-ledger v0.1.0-rc.2 (15 tools)**.
+shows the plugin name, version and database path. The stable release is
+**hermes-lcm-ledger v1.0.0 (15 tools)**. [Release notes](https://github.com/ben-wf/hermes-lcm-ledger/releases/tag/v1.0.0)
 
 ### Updates
 
-For a standard GitHub installation, use the installed plugin name.
+The standard GitHub installation tracks the default branch. To update it,
+use the installed plugin name.
 
 ```bash
 hermes plugins update hermes-lcm-ledger

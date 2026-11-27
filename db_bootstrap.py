@@ -325,6 +325,47 @@ _V5_CORE_OPTIONAL_COLUMNS: dict[str, frozenset[str]] = {
     "messages": frozenset({"ingested_at", "observed_at", "observed_at_source"}),
 }
 
+# Receipt tables are absent in earlier v5 archives. If present, they must
+# match the shipped shape exactly: a later build's publication records are
+# durable lineage and cannot be dropped as a rebuildable feature cache.
+_LEAF_PUBLICATION_SCHEMA = {
+    "lcm_leaf_publications": """CREATE TABLE IF NOT EXISTS lcm_leaf_publications (
+        node_id INTEGER PRIMARY KEY,
+        input_digest TEXT NOT NULL,
+        source_session_id TEXT NOT NULL,
+        consumed_through INTEGER NOT NULL
+    )""",
+    "idx_lcm_leaf_input": """CREATE INDEX IF NOT EXISTS idx_lcm_leaf_input
+        ON lcm_leaf_publications(input_digest)""",
+    "lcm_leaf_publication_delete": """CREATE TRIGGER IF NOT EXISTS lcm_leaf_publication_delete
+        AFTER DELETE ON summary_nodes BEGIN
+            DELETE FROM lcm_leaf_publications WHERE node_id = OLD.node_id;
+        END""",
+}
+
+
+def ensure_leaf_publication_schema(conn: sqlite3.Connection) -> None:
+    for sql in _LEAF_PUBLICATION_SCHEMA.values():
+        conn.execute(sql)
+
+
+def _known_leaf_publication_schema(conn: sqlite3.Connection) -> bool:
+    rows = conn.execute(
+        """SELECT name, sql FROM sqlite_master
+           WHERE tbl_name = 'lcm_leaf_publications' OR name GLOB 'lcm_leaf_*' OR name GLOB 'idx_lcm_leaf_*'"""
+    ).fetchall()
+    if not rows:
+        return True
+
+    def normalize(sql: str) -> str:
+        # sqlite_master omits IF NOT EXISTS from stored CREATE statements.
+        return "".join(sql.lower().split()).replace("ifnotexists", "").rstrip(";")
+
+    return {name: normalize(sql or "") for name, sql in rows} == {
+        name: normalize(sql) for name, sql in _LEAF_PUBLICATION_SCHEMA.items()
+    }
+
+
 # Core FTS5 virtual tables: presence is enough — their column layout is owned by
 # the FTS5 module, not by this schema contract.
 _V5_CORE_PRESENCE_ONLY = ("messages_fts", "nodes_fts")
@@ -457,8 +498,8 @@ def classify_version_mismatch(conn: sqlite3.Connection) -> str:
     and the *names* of the extras:
 
     * :data:`VERSION_MISMATCH_INTERIM_STAMP` — the core v5 shape matches exactly
-      AND every extra table matches a known feature-family prefix (or is an FTS5
-      shadow table). This is the signature of an interim development build that
+      AND any publication receipts match the known shape and all remaining
+      tables belong to known feature families or FTS5 shadows. This is the signature of an interim development build that
       stamped a numeric version it never migrated to; the feature tables may be
       early variants and are remediated separately (see
       :func:`remediate_interim_schema_stamp`).
@@ -471,6 +512,8 @@ def classify_version_mismatch(conn: sqlite3.Connection) -> str:
     """
     try:
         tables = _user_table_names(conn)
+        if not _known_leaf_publication_schema(conn):
+            return VERSION_MISMATCH_GENUINELY_NEWER
     except sqlite3.DatabaseError:
         return VERSION_MISMATCH_GENUINELY_NEWER
 
@@ -496,7 +539,7 @@ def classify_version_mismatch(conn: sqlite3.Connection) -> str:
     # Any extra table must belong to a known feature family or be an FTS5 shadow.
     # The feature table's *internal* shape is intentionally NOT checked here — an
     # early-variant feature table is still an interim stamp, repaired on apply.
-    allowed = set(_V5_CORE_TABLE_COLUMNS) | set(_V5_CORE_PRESENCE_ONLY)
+    allowed = set(_V5_CORE_TABLE_COLUMNS) | set(_V5_CORE_PRESENCE_ONLY) | {"lcm_leaf_publications"}
     for fts in _V5_CORE_PRESENCE_ONLY:
         allowed.update(get_fts_shadow_table_names(fts))
     for table in tables:

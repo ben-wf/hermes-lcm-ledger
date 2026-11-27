@@ -26,6 +26,7 @@ from .db_bootstrap import (
     add_column_if_missing,
     configure_connection,
     ensure_external_content_fts,
+    ensure_leaf_publication_schema,
     is_fts_corruption_error,
     refuse_schema_version_too_new,
     repair_external_content_fts,
@@ -213,23 +214,12 @@ class SummaryDAG:
             CREATE INDEX IF NOT EXISTS idx_nodes_session_depth_node
                 ON summary_nodes(session_id, depth, node_id);
 
-            CREATE TABLE IF NOT EXISTS lcm_leaf_publications (
-                node_id INTEGER PRIMARY KEY,
-                input_digest TEXT NOT NULL,
-                source_session_id TEXT NOT NULL,
-                consumed_through INTEGER NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_lcm_leaf_input ON lcm_leaf_publications(input_digest);
-            CREATE TRIGGER IF NOT EXISTS lcm_leaf_publication_delete AFTER DELETE ON summary_nodes
-            BEGIN
-                DELETE FROM lcm_leaf_publications WHERE node_id = OLD.node_id;
-            END;
-
             CREATE TABLE IF NOT EXISTS metadata (
                 key TEXT PRIMARY KEY,
                 value TEXT
             );
         """)
+        ensure_leaf_publication_schema(self._conn)
         ensure_external_content_fts(
             self._conn,
             build_nodes_fts_spec(),

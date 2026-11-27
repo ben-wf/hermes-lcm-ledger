@@ -9,6 +9,7 @@ condition, the refusal-message guidance, and the explicit backup-first repair.
 from __future__ import annotations
 
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -184,6 +185,38 @@ def test_classify_interim_stamp_on_v5_shape(tmp_path):
         assert classify_version_mismatch(conn) == db_bootstrap.VERSION_MISMATCH_INTERIM_STAMP
     finally:
         conn.close()
+
+
+@pytest.mark.parametrize("schema_change", [
+    "ALTER TABLE lcm_leaf_publications ADD COLUMN future_origin TEXT",
+    "ALTER TABLE lcm_leaf_publications DROP COLUMN consumed_through",
+    "CREATE TABLE lcm_leaf_future_records(node_id INTEGER)",
+    "CREATE INDEX idx_lcm_leaf_future ON lcm_leaf_publications(consumed_through)",
+    "DROP TRIGGER lcm_leaf_publication_delete",
+])
+def test_schema_stamp_refuses_unrecognized_leaf_receipts(tmp_path, schema_change):
+    db_path = tmp_path / "lcm.db"
+    _build_v5_db(db_path)
+    _stamp(db_path, db_bootstrap.SCHEMA_VERSION + 1)
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.execute(schema_change)
+        assert remediate_interim_schema_stamp(conn, apply=True)["status"] == "refused"
+        assert db_bootstrap.read_existing_schema_version(conn) == db_bootstrap.SCHEMA_VERSION + 1
+
+
+def test_interim_archive_before_leaf_receipts_remains_repairable(tmp_path):
+    db_path = tmp_path / "lcm.db"
+    _build_v5_db(db_path)
+    _stamp(db_path, db_bootstrap.SCHEMA_VERSION + 1)
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.execute("DROP TRIGGER lcm_leaf_publication_delete")
+        conn.execute("DROP TABLE lcm_leaf_publications")
+        assert remediate_interim_schema_stamp(conn, apply=True)["status"] == "ok"
+    dag = SummaryDAG(db_path)
+    try:
+        assert dag.get_leaf_for_input("session", "missing") is None
+    finally:
+        dag.close()
 
 
 def test_classify_interim_stamp_with_feature_marker_tables(tmp_path):

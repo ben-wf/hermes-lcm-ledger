@@ -2,6 +2,13 @@
 
 This repo also publishes GitHub Releases. This file is the repo-root release surface for operators who want the recent release arc without leaving the checkout.
 
+## v0.1.0-rc.2 - 2026-11-27
+
+- Publish a leaf summary and its restart checkpoint together. Context assembly discovers all summary depths in long sessions.
+- Serialize rotations and copy a fixed SQLite snapshot while ingestion continues. Preserve pending FTS corruption reports until a completed check.
+- Reduce message decoding in full-text searches and preserve raw character offsets for answer-ready citations under concurrent writes.
+- Freeze recall guidance on compatible Hermes hosts and show loaded settings for the focused Ledger chat in Desktop.
+
 ## v0.1.0-rc.1 - 2026-11-26
 
 First LCM Ledger candidate. Includes PR #589, public turn-hook registration

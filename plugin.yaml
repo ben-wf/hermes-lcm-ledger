@@ -1,5 +1,5 @@
 name: hermes-lcm-ledger
-version: 0.1.0-rc.1
+version: 0.1.0-rc.2
 requires_hermes: ">=0.23.4,<1"
 description: "Lossless Context Management — LCM Ledger archives turns in local SQLite and retrieves raw messages after compaction"
 author: "Benjamin Wittorf (fork), Stephen Schoettler and contributors (upstream)"

@@ -55,6 +55,41 @@ function control(field, raw, change, disabled) {
   return h('input', {...common, type: field.type === 'number' ? 'number' : 'text', step: field.integer ? 1 : 'any'})
 }
 
+const emptyAtom = {get: () => null, listen: () => () => {}}
+
+function useSessionValues(profile, epoch, refresh) {
+  const session = useValue(host.state.focusedSessionId || emptyAtom)
+  const owner = useValue(host.state.focusedSessionOwner || emptyAtom)
+  const connection = useValue(host.state.connectionId || emptyAtom)
+  const [snapshot, setSnapshot] = useState(null)
+  const target = session && owner?.profile === profile && owner.connectionId === (connection || 'local') ? session : null
+  useEffect(() => {
+    let active = true
+    setSnapshot(null)
+    if (target) {
+      host.request('plugin.' + pluginId + '.session_settings', {session_id: target}).then(result => {
+        if (active && result?.session_id === target) setSnapshot(result)
+      }).catch(() => {})
+    }
+    return () => { active = false }
+  }, [target, epoch, refresh])
+  return target && snapshot?.session_id === target ? snapshot : null
+}
+
+function runtimeLabel(field, runtime) {
+  if (runtime?.loaded && Object.hasOwn(runtime.loaded, field.key)) {
+    const value = runtime.loaded[field.key]
+    const pending = field.value !== value ? ' · differs from profile' : ''
+    const effective = field.key === 'context_threshold' && value !== runtime.context_threshold
+      ? ' · current model uses ' + runtime.context_threshold : ''
+    return 'Loaded in focused chat: ' + String(value) + pending + effective
+  }
+  if (runtime?.matches && Object.hasOwn(runtime.matches, field.key)) {
+    return runtime.matches[field.key] ? 'Loaded setting matches the gateway profile' : 'Loaded setting differs from the gateway profile'
+  }
+  return 'Read when Ledger initializes'
+}
+
 function Form({ctx, profile, epoch}) {
   const [data, setData] = useState(null)
   const [draft, setDraft] = useState({})
@@ -62,6 +97,7 @@ function Form({ctx, profile, epoch}) {
   const [query, setQuery] = useState('')
   const [message, setMessage] = useState('')
   const [busy, setBusy] = useState(false)
+  const runtime = useSessionValues(profile, epoch, refresh)
   const sameProfile = () => host.state.profile.get() === profile && gatewayActivationEpoch() === epoch
 
   useEffect(() => {
@@ -105,7 +141,7 @@ function Form({ctx, profile, epoch}) {
       }
       if (!sameProfile()) return
       setDraft({})
-      setMessage('Saved. New Ledger sessions load these values.')
+      setMessage('Saved to the profile. Restart the Hermes process serving this profile to load changes.')
       setRefresh(n => n + 1)
     } catch (error) { if (sameProfile()) setMessage(error.message) }
     finally { if (sameProfile()) setBusy(false) }
@@ -116,6 +152,9 @@ function Form({ctx, profile, epoch}) {
   const fields = data?.fields.filter(f => [f.key, f.label, f.source].join(' ').toLowerCase().includes(filter)) ?? []
   return h('div', {className: 'grid gap-4'}, [
     h('h2', {key: 'title', className: 'text-lg font-semibold'}, 'LCM Ledger · ' + profile),
+    h('p', {key: 'scope'}, runtime
+      ? 'Inputs show resolved profile settings. Loaded values refer to the focused chat. Startup-only options show their configured value.'
+      : 'Inputs show resolved profile settings. Live settings for a focused Ledger chat are unavailable.'),
     h('div', {key: 'actions', className: 'flex flex-wrap gap-2'}, [
       h('input', {key: 'filter', className: inputStyle, type: 'search', placeholder: 'Find a setting', 'aria-label': 'Find a setting', value: query, onChange: e => setQuery(e.target.value)}),
       h('button', {key: 'reload', className: buttonStyle, disabled: busy || dirty, onClick: () => {setMessage(''); setRefresh(n => n + 1)}}, 'Refresh'),
@@ -128,7 +167,8 @@ function Form({ctx, profile, epoch}) {
       h('label', {key: 'label', htmlFor: 'ledger-' + field.key, className: 'font-medium'}, field.label),
       h('p', {key: 'desc', className: 'text-sm text-muted-foreground'}, field.description),
       h('div', {key: 'control'}, control(field, draft[field.key] ?? display(field), raw => edit(field, raw), busy)),
-      h('small', {key: 'source'}, sourceLabel(field.source))
+      h('small', {key: 'source'}, sourceLabel(field.source)),
+      runtime && h('small', {key: 'runtime'}, runtimeLabel(field, runtime))
     ]))
   ])
 }

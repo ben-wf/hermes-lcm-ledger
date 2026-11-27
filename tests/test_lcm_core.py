@@ -3420,6 +3420,21 @@ class TestLifecycleStateStore:
         assert state.row_count() == 1
         state.close()
 
+    def test_prune_recent_sessions_does_not_reserve_writer_or_scan_archive(self, tmp_path):
+        db_path = tmp_path / "recent.db"
+        store = MessageStore(db_path)
+        state = LifecycleStateStore(db_path)
+        try:
+            state.bind_session("recent")
+            store.append("recent", {"role": "user", "content": "recent"})
+            statements = []
+            state.connection.set_trace_callback(statements.append)
+            assert state.prune_empty_sessions(max_age_hours=1) == 0
+            assert not any("BEGIN IMMEDIATE" in sql or "FROM messages" in sql for sql in statements)
+        finally:
+            state.close()
+            store.close()
+
     def test_prune_empty_sessions_handles_mixed_state(self, tmp_path):
         db_path = tmp_path / "prune-mixed.db"
         state = LifecycleStateStore(db_path)

@@ -15,6 +15,8 @@ lifecycle) through normal attribute lookup. ``LCMEngine`` mixes this in ahead of
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import sqlite3
 import time
@@ -29,6 +31,23 @@ logger = logging.getLogger(__name__)
 
 _THRESHOLD_FULL_SWEEP_MAX_PASSES = 12
 _THRESHOLD_FULL_SWEEP_MAX_SECONDS = 120.0
+
+
+def _leaf_input_digest(messages: list[dict], dependent_replies: set[int]) -> str:
+    """Fingerprint the ordered, filtered input independently of the model's output."""
+    digest = hashlib.sha256()
+    for message in messages:
+        # Include stable host origin fields when present so two inherited messages
+        # with identical text but different timestamps or IDs stay distinguishable.
+        fields = [message.get(key) for key in (
+            "role", "name", "content", "tool_calls", "tool_call_id", "codex_message_items",
+            "timestamp", "session_id", "message_id", "id",
+        )]
+        fields.append(id(message) in dependent_replies)
+        encoded = json.dumps(fields, sort_keys=True, default=str, ensure_ascii=False, separators=(",", ":"))
+        digest.update(encoded.encode("utf-8", errors="surrogatepass"))
+        digest.update(b"\n")
+    return digest.hexdigest()
 
 
 class CompactionMixin:
@@ -552,6 +571,11 @@ class CompactionMixin:
             if threshold_full_sweep_active and time.monotonic() >= sweep_deadline:
                 sweep_stop_reason = "time_budget_exhausted"
                 break
+            expected_frontier = self._last_compacted_store_id
+            session_id = self._session_id
+            conversation_id = self._conversation_id
+            rotation = self._rotation_checkpoint
+            rotated_frontier = rotation[2] if rotation and rotation[:2] == (session_id, conversation_id) else 0
             fresh_tail_start = self._fresh_tail_start(pressure_messages)
 
             # Keep only a real system prompt anchored. Gateway sessions may
@@ -718,10 +742,23 @@ class CompactionMixin:
                 break
 
             selected_raw_chunk = to_compact
+            previous_leaf = None
+            input_digest = None
+            if not any(
+                id(msg) in self._current_compress_store_ids_by_message_id for msg in selected_raw_chunk
+            ) and not self._get_store_ids_for_messages(selected_raw_chunk):
+                # A retry after a commit or an inherited prefix can have no new
+                # local source rows. An exact receipt lets us reuse the model
+                # result and consume this prefix without hiding later raw rows.
+                input_digest = _leaf_input_digest(selected_raw_chunk, dependent_reply_message_ids)
+                previous_leaf = self._dag.get_leaf_for_input(session_id, input_digest)
             summary_input_chunk = [
                 message for message in selected_raw_chunk if id(message) not in dependent_reply_message_ids
             ]
-            if not summary_input_chunk:
+            if previous_leaf:
+                compacted_chunk = selected_raw_chunk
+                summary_text = previous_leaf.summary
+            elif not summary_input_chunk:
                 compacted_chunk = selected_raw_chunk
                 source_tokens = count_messages_tokens(selected_raw_chunk)
                 summary_text = (
@@ -794,15 +831,21 @@ class CompactionMixin:
             source_lineage_chunk = [
                 message for message in source_lookup_chunk if id(message) not in dependent_reply_message_ids
             ]
-            source_store_ids = self._get_store_ids_for_messages(source_lineage_chunk)
-            source_store_ids = sorted(dict.fromkeys(source_store_ids))
-            consumed_store_ids = self._get_store_ids_for_messages(source_lookup_chunk)
-            consumed_store_ids = sorted(dict.fromkeys(consumed_store_ids))
+            source_store_ids = sorted(set(self._get_store_ids_for_messages(source_lineage_chunk)))
+            # Lineage omits replies derived from ignored messages. Only those
+            # replies warrant a second match with different occurrence counts.
+            if len(source_lineage_chunk) == len(source_lookup_chunk):
+                consumed_store_ids = source_store_ids
+            else:
+                consumed_store_ids = self._get_store_ids_for_messages(source_lookup_chunk)
+            next_frontier = max(consumed_store_ids, default=expected_frontier)
+            if input_digest is None or len(source_lookup_chunk) != len(selected_raw_chunk):
+                input_digest = _leaf_input_digest(source_lookup_chunk, dependent_reply_message_ids)
             earliest_at, latest_at = self._store.get_time_bounds(source_store_ids)
             summary_tokens = count_tokens(summary_text)
 
             node = SummaryNode(
-                session_id=self._session_id,
+                session_id=session_id,
                 depth=0,
                 summary=summary_text,
                 token_count=summary_tokens,
@@ -814,11 +857,23 @@ class CompactionMixin:
                 latest_at=latest_at,
                 expand_hint=self._extract_expand_hint(summary_text),
             )
-            self._dag.add_node(node)
+            if not self._dag.add_node(
+                node,
+                conversation_id=conversation_id,
+                expected_frontier=expected_frontier,
+                next_frontier=next_frontier,
+                rotated_frontier=rotated_frontier,
+                input_digest=input_digest,
+            ):
+                state = self._lifecycle.get_by_conversation(conversation_id)
+                if state and state.current_session_id == session_id == self._session_id:
+                    self._last_compacted_store_id = state.current_frontier_store_id
+                noop_reason = "session or compaction frontier changed during summarization"
+                sweep_stop_reason = "compaction_frontier_changed"
+                break
+            self._last_compacted_store_id = next_frontier
             self._invalidate_rollups_for_published_node(node)
             self._maybe_gc_compacted_tool_results(compacted_chunk, source_store_ids)
-            self._last_compacted_store_id = max(consumed_store_ids) if consumed_store_ids else 0
-            self._persist_frontier_marker()
 
             pressure_remaining_messages = pressure_messages[leading_anchor_count + selected_raw_len:]
             working_messages = working_messages[:leading_anchor_count] + remaining_messages
@@ -1017,7 +1072,7 @@ class CompactionMixin:
             "es" if leaf_passes != 1 else "",
             count_messages_tokens(messages),
             count_messages_tokens(compressed),
-            len(self._dag.get_session_nodes(self._session_id)),
+            self._dag.get_session_node_count(self._session_id),
             ", forced overflow recovery" if force_overflow else "",
         )
 
@@ -1033,6 +1088,7 @@ class CompactionMixin:
                 "pass_budget_exhausted",
                 "time_budget_exhausted",
                 "leaf_summary_error",
+                "compaction_frontier_changed",
                 "condensation_error",
                 "condensation_no_progress",
                 "no_same_depth_condensation_group",

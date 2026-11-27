@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from contextlib import ExitStack, closing, contextmanager
 import json
 import logging
 import re
@@ -1096,7 +1097,15 @@ def _content_offset_for_query_match(content: str, query: str | None) -> int:
     for term in _query_terms_for_match_window(query):
         index = folded.find(term.casefold())
         if index >= 0:
-            return index
+            if len(folded) == len(content):
+                return index
+            # Case folding may expand a character (e.g. ß -> ss). Convert
+            # the position back to the original string's character offsets.
+            folded_end = 0
+            for offset, char in enumerate(content):
+                folded_end += len(char.casefold())
+                if folded_end > index:
+                    return offset
     return 0
 
 
@@ -2494,6 +2503,7 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
 
     if content_scope in {"history", "both"}:
         try:
+            verbatim = bool(kwargs.get("_verbatim_snippets"))
             msg_hits = engine._store.search(
                 query,
                 session_id=search_session_id,
@@ -2504,15 +2514,28 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                 role=role,
                 time_from=time_from,
                 time_to=time_to,
+                **({"verbatim_snippets": True} if verbatim else {}),
             )
             for hit in msg_hits:
-                results.append(
-                    _shape_message_hit(
-                        hit,
-                        current_session_id=current_session_id,
-                        has_current_session=has_current_session,
-                    )
+                item = _shape_message_hit(
+                    hit, current_session_id=current_session_id,
+                    has_current_session=has_current_session,
                 )
+                if verbatim:
+                    # SQLite returned a contiguous window without decorative
+                    # markers. Locate it before truncating, including when the
+                    # source itself contains literal markers or ellipses.
+                    snippet = item["snippet"] or ""
+                    start = (hit.get("content") or "").find(snippet)
+                    if snippet and start >= 0:
+                        match = _content_offset_for_query_match(snippet, query)
+                        window = _lcm_recall_content_window(
+                            snippet, match_start=match, match_end=match + 1,
+                            char_cap=_LCM_RECALL_SNIPPET_CHARS,
+                        )
+                        item["snippet"] = window["content"]
+                        item["content_offset"] = start + window["content_offset"]
+                results.append(item)
         except Exception as exc:
             logger.warning("Message search failed: %s", exc)
 
@@ -2837,12 +2860,55 @@ def _run_within_deadline(
     return value
 
 
+@contextmanager
+def _retrieval_reader(engine: "LCMEngine", deadline: float):
+    """Borrow a request-local SQLite reader without touching live writer locks."""
+    if engine._store._is_memory_database:
+        # Private in-memory databases have no second connection. Bound the
+        # wait for their original handles and release both on every exit.
+        with ExitStack() as held:
+            for lock in (engine._store._write_lock, engine._dag._db_lock):
+                if not lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+                    raise TimeoutError("retrieval read deadline exceeded")
+                held.callback(lock.release)
+            yield engine
+        return
+    uri = f"{Path(engine._store.db_path).resolve().as_uri()}?mode=ro"
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("retrieval read deadline exceeded")
+    with closing(sqlite3.connect(uri, uri=True, timeout=remaining)) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only=ON")
+        conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+        read_engine = copy.copy(engine)
+        read_store = copy.copy(engine._store)
+        read_store._conn = conn
+        read_store._write_lock = threading.RLock()
+        read_dag = copy.copy(engine._dag)
+        read_dag._conn = conn
+        read_dag._db_lock = read_store._write_lock
+        read_engine._store = read_store
+        read_engine._dag = read_dag
+        try:
+            yield read_engine
+        except sqlite3.OperationalError as exc:
+            if time.monotonic() >= deadline:
+                raise TimeoutError("retrieval read deadline exceeded") from exc
+            raise
+        finally:
+            # The context owns the connection; facade finalizers must not.
+            read_store._conn = None
+            read_dag._conn = None
+
+
 def _lcm_grep_full_text_with_deadline(
     args: Dict[str, Any],
     *,
     engine: "LCMEngine",
     deadline: float,
     limit_cap: int = _LCM_GREP_HARD_LIMIT_CAP,
+    verbatim_snippets: bool = False,
 ) -> dict[str, Any]:
     """Run FTS on independent read connections under the request deadline."""
     remaining = deadline - time.monotonic()
@@ -2852,75 +2918,18 @@ def _lcm_grep_full_text_with_deadline(
         )
 
     def invoke() -> dict[str, Any]:
-        message_conn: sqlite3.Connection | None = None
-        dag_conn: sqlite3.Connection | None = None
-        expired = [False]
-
-        def require_remaining(stage: str) -> float:
-            stage_remaining = deadline - time.monotonic()
-            if stage_remaining <= 0:
-                raise TimeoutError(f"lcm full-text deadline exhausted before {stage}")
-            return stage_remaining
-
-        def interrupt_if_expired() -> int:
-            if time.monotonic() >= deadline:
-                expired[0] = True
-                return 1
-            return 0
-
-        try:
-            require_remaining("database path resolution")
-            db_path = Path(engine._store.db_path).resolve()
-            require_remaining("database path resolution")
-            uri = f"{db_path.as_uri()}?mode=ro"
-            require_remaining("database URI construction")
-            message_conn = sqlite3.connect(
-                uri,
-                uri=True,
-                timeout=max(0.001, require_remaining("message connection")),
-            )
-            require_remaining("message connection")
-            require_remaining("DAG connection")
-            dag_conn = sqlite3.connect(
-                uri,
-                uri=True,
-                timeout=max(0.001, require_remaining("DAG connection")),
-            )
-            require_remaining("DAG connection")
-            for conn in (message_conn, dag_conn):
-                require_remaining("connection setup")
-                conn.row_factory = sqlite3.Row
-                conn.execute("PRAGMA query_only=ON")
-                require_remaining("connection setup")
-                conn.set_progress_handler(interrupt_if_expired, 1000)
-                require_remaining("connection setup")
-            read_engine = copy.copy(engine)
-            read_store = copy.copy(engine._store)
-            read_dag = copy.copy(engine._dag)
-            read_store._conn = message_conn
-            read_store._db_lock = threading.RLock()
-            read_dag._conn = dag_conn
-            read_dag._db_lock = threading.RLock()
-            read_engine._store = read_store
-            read_engine._dag = read_dag
-            require_remaining("full-text search")
+        with _retrieval_reader(engine, deadline) as reader:
             payload = json.loads(
                 _lcm_grep_full_text(
-                    args,
-                    engine=read_engine,
-                    _limit_cap=limit_cap,
+                    args, engine=reader, _limit_cap=limit_cap,
+                    _verbatim_snippets=verbatim_snippets,
                 )
             )
-            if expired[0] or time.monotonic() >= deadline:
+            if time.monotonic() >= deadline:
                 return _lcm_grep_deadline_error(
                     str(args.get("mode") or "semantic").lower(), "full_text"
                 )
             return payload
-        finally:
-            if message_conn is not None:
-                message_conn.close()
-            if dag_conn is not None:
-                dag_conn.close()
 
     try:
         return _run_within_deadline(
@@ -3588,8 +3597,7 @@ def _lcm_recall_verified_span(
 
     * a stale ``chunk_span`` whose row was deleted or rewritten between chunk
       hydration and response shaping (no coherent snapshot spans those reads);
-    * an FTS snippet, which is a match window with markers rather than a
-      verbatim prefix, so its ``content_offset`` of 0 is not a real location;
+    * a stale FTS or LIKE window whose text no longer occupies its offset;
     * a hydration miss, where the promised window never arrived.
 
     Returning the span rather than a bool is deliberate: the caller PUBLISHES it
@@ -3762,10 +3770,8 @@ class _LcmRecallStrictSelector:
     delivered text is a window cut from the row, so the row's existence IS the
     proof and the same snapshot is handed to hydration. Past that budget the hit
     ships its own excerpt, so the excerpt must be found at its offset. When a row
-    surfaced through several arms, each arm's representation is tried in turn: an
-    FTS match window is not a verbatim prefix and will not verify, but the chunk
-    or summary-source representation of the same row does, and delivering that is
-    not a swap -- it is the same row, quoted somewhere it really says.
+    surfaced through several arms, each arm's representation is tried in turn: a
+    stale excerpt can be replaced by a still-verifiable excerpt of the same row.
     """
 
     def __init__(
@@ -4209,7 +4215,8 @@ def _lcm_recall_approx_reason(arm: str) -> str:
 
 
 def _lcm_recall_fts_arm(
-    engine: "LCMEngine", query: str, *, candidate_limit: int, deadline: float
+    engine: "LCMEngine", query: str, *, candidate_limit: int, deadline: float,
+    verbatim_snippets: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
     """FTS arm: raw messages across ALL sessions (no conversation filter)."""
     payload = _lcm_grep_full_text_with_deadline(
@@ -4222,6 +4229,7 @@ def _lcm_recall_fts_arm(
         engine=engine,
         deadline=deadline,
         limit_cap=_LCM_GREP_HYBRID_CANDIDATE_CAP,
+        verbatim_snippets=verbatim_snippets,
     )
     if "error" in payload:
         return [], payload
@@ -4237,7 +4245,7 @@ def _lcm_recall_fts_arm(
             "source": row.get("source") or "",
             "role": row.get("role"),
             "timestamp": row.get("timestamp") or 0,
-            "content_offset": 0,
+            "content_offset": row.get("content_offset") if verbatim_snippets else 0,
             "snippet": (row.get("snippet") or "")[:_LCM_RECALL_SNIPPET_CHARS],
             "from_current_session": bool(row.get("from_current_session")),
         }
@@ -4302,33 +4310,7 @@ def _lcm_recall_summary_source_hits(
         return remaining
 
     require_remaining("database connection")
-    db_path = Path(engine._store.db_path).resolve()
-    uri = f"{db_path.as_uri()}?mode=ro"
-    conn: sqlite3.Connection | None = None
-    expired = [False]
-
-    def interrupt_if_expired() -> int:
-        if time.monotonic() >= deadline:
-            expired[0] = True
-            return 1
-        return 0
-
-    try:
-        conn = sqlite3.connect(
-            uri,
-            uri=True,
-            timeout=max(0.001, require_remaining("database connection")),
-        )
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA query_only=ON")
-        conn.set_progress_handler(interrupt_if_expired, 1000)
-        read_store = copy.copy(engine._store)
-        read_dag = copy.copy(engine._dag)
-        read_store._conn = conn
-        read_dag._conn = conn
-        read_store._write_lock = threading.RLock()
-        read_dag._db_lock = threading.RLock()
-
+    with _retrieval_reader(engine, deadline) as reader:
         leads: list[dict[str, Any]] = []
         ordered_ids: list[int] = []
         seen: set[int] = set()
@@ -4347,7 +4329,7 @@ def _lcm_recall_summary_source_hits(
                 leads.append(lead)
             if len(ordered_ids) >= candidate_limit:
                 continue
-            for store_id in read_dag.source_message_ids(
+            for store_id in reader._dag.source_message_ids(
                 node.node_id, limit=_LCM_RECALL_SUMMARY_SOURCE_PER_NODE
             ):
                 if store_id in seen:
@@ -4358,7 +4340,7 @@ def _lcm_recall_summary_source_hits(
 
         hits: list[dict[str, Any]] = []
         rows = (
-            read_store.get_batch(ordered_ids[:candidate_limit]) if ordered_ids else {}
+            reader._store.get_batch(ordered_ids[:candidate_limit]) if ordered_ids else {}
         )
         for store_id in ordered_ids[:candidate_limit]:
             require_remaining("message shaping")
@@ -4385,13 +4367,6 @@ def _lcm_recall_summary_source_hits(
             hit["expand_hint"] = _lcm_recall_excerpt_expand_hint(hit)
             hits.append(hit)
         return hits, leads
-    except sqlite3.OperationalError as exc:
-        if expired[0] or time.monotonic() >= deadline:
-            raise TimeoutError("summary source expansion deadline exhausted") from exc
-        raise
-    finally:
-        if conn is not None:
-            conn.close()
 
 
 def _lcm_recall_summary_arm(
@@ -4590,6 +4565,18 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     scope/recency prior and (optionally) a cross-encoder rerank. The current
     conversation is only ever a ranking BOOST, never a hard filter.
     """
+    try:
+        with ExitStack() as readers:
+            return _lcm_recall(args, readers, **kwargs)
+    except TimeoutError:
+        return json.dumps({
+            "error": "lcm_recall request deadline exceeded",
+            "timeout": True,
+            "timeout_stage": "response_hydration",
+        })
+
+
+def _lcm_recall(args: Dict[str, Any], readers: ExitStack, **kwargs) -> str:
     request_started = time.monotonic()
     engine = _require_engine(kwargs)
     if engine is None:
@@ -4672,7 +4659,8 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     if run_fts:
         try:
             hits, fts_error = _lcm_recall_fts_arm(
-                engine, query, candidate_limit=candidate_limit, deadline=deadline
+                engine, query, candidate_limit=candidate_limit, deadline=deadline,
+                verbatim_snippets=reference_strict,
             )
         except (_WorkerCapacityError, TimeoutError) as exc:
             hits, fts_error = [], {"error": str(exc)}
@@ -4683,6 +4671,12 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         else:
             arm_hits["fts"] = hits
             coverage["fts"] = "ok"
+
+    # Keep enough of the same absolute request budget to verify evidence if
+    # a vector provider or reranker stalls after FTS has already returned.
+    hydration_deadline = deadline
+    if detail == "answer_ready" and embeddings_enabled:
+        deadline -= min(0.1, timeout_s * 0.1)
 
     # -- Vector arms. Local/same-model corpora share one query embedding;
     # Voyage's context chunk corpus resolves and embeds with its own model. --
@@ -4850,14 +4844,8 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     chunk_by_store: dict[Any, dict[str, Any]] = {}
     for chunk_hit in arm_hits.get("chunk", []):
         chunk_by_store.setdefault(chunk_hit.get("store_id"), chunk_hit)
-    # Every OTHER arm's representation of the same row is kept alongside the
-    # fused base rather than discarded. Fusion picks one base per identity (the
-    # earliest arm, so FTS when it hit), but an FTS snippet is a match window
-    # with markers -- not a verbatim span -- so a row whose only surviving
-    # representation is the FTS one cannot be cited beyond the hydration budget
-    # even though the chunk or summary-source excerpt of that same row could be.
-    # Reference-strict verification tries these in order and delivers the first
-    # that the row actually supports.
+    # Keep the other arms' excerpts of the same row. If its winning excerpt
+    # goes stale, strict verification can try an alternate against the row.
     alternates_by_store: dict[Any, list[dict[str, Any]]] = {}
     for arm_name in ("summary", "chunk"):
         for other_hit in arm_hits.get(arm_name, []):
@@ -4928,6 +4916,12 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     # stable post-rank diversity before bounded exact-ref hydration.
     diversity_dropped = 0
     if detail == "answer_ready":
+        if ordered and time.monotonic() >= hydration_deadline:
+            ordered = []
+            timed_out = True
+            degraded_reasons.append("response hydration deadline exceeded")
+        if ordered:
+            engine = readers.enter_context(_retrieval_reader(engine, hydration_deadline))
         # Take only what the response can hold. Delta used to select the whole
         # 25-candidate cap up front and filter afterwards, which walked the
         # ranking to exhaustion while already-seen entries held session quota --
@@ -5053,7 +5047,10 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                     item["exact_ref"] = exact_ref
             if include_occurrence_time and hit.get("kind") != "summary":
                 session_dates = getattr(engine, "_session_occurrence_dates", {}) or {}
-                source_row = engine._store.get(int(hit.get("store_id") or 0))
+                source_row = (
+                    strict_selector.rows.get(int(hit["store_id"])) if reference_strict
+                    else engine._store.get(int(hit.get("store_id") or 0))
+                )
                 source_row = source_row or {}
                 source_observed_at = source_row.get("observed_at")
                 session_date = session_dates.get(str(hit.get("session_id")))

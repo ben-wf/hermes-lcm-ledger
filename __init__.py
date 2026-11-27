@@ -155,8 +155,25 @@ def _effective_preanswer_mode(config) -> str:
     return raw if raw in {"off", "legacy_selective", "requirements_v1"} else "off"
 
 
+def _history_has_recall_policy(history, policy: str) -> bool:
+    """Only count a host-injected suffix on a user row that Hermes will replay."""
+    if not isinstance(history, (list, tuple)):
+        return False
+    needle = "\n\n" + policy
+    for row in reversed(history):
+        if not isinstance(row, dict) or row.get("role") != "user":
+            continue
+        content, wire = row.get("content"), row.get("api_content")
+        if not isinstance(content, str) or not isinstance(wire, str):
+            continue
+        if wire.startswith(content) and wire.find(needle, len(content)) >= 0:
+            return True
+    return False
+
+
 def _pre_llm_context(active_engine, recall_policy: str, payload: dict) -> dict:
     """Keep ordinary baseline bytes, or add one bounded product-owned delta."""
+    baseline = {"context": recall_policy} if recall_policy else {}
     enabled_toolsets = payload.get("enabled_toolsets")
     context_engine_enabled = not (
         isinstance(enabled_toolsets, (list, tuple, set, frozenset))
@@ -165,11 +182,11 @@ def _pre_llm_context(active_engine, recall_policy: str, payload: dict) -> dict:
     config = getattr(active_engine, "_config", None)
     mode = _effective_preanswer_mode(config)
     if mode == "off" or not context_engine_enabled:
-        return {"context": recall_policy}
+        return baseline
     try:
         question = str(payload.get("user_message") or "").strip()
         if not question:
-            return {"context": recall_policy}
+            return baseline
         question_date = _hook_question_date(payload)
 
         if mode == "requirements_v1":
@@ -178,7 +195,7 @@ def _pre_llm_context(active_engine, recall_policy: str, payload: dict) -> dict:
 
             contract = compile_answer_contract(question, question_date)
             if contract.status != "planned":
-                return {"context": recall_policy}
+                return baseline
             baseline_was_internal = not isinstance(
                 payload.get("baseline_refs"), (list, tuple)
             )
@@ -200,8 +217,8 @@ def _pre_llm_context(active_engine, recall_policy: str, payload: dict) -> dict:
                 pass
             context = result.get("context") if isinstance(result, dict) else None
             if not isinstance(context, str) or not context:
-                return {"context": recall_policy}
-            return {"context": f"{recall_policy}\n\n{context}"}
+                return baseline
+            return {"context": "\n\n".join(filter(None, (recall_policy, context)))}
 
         from .selective_recall import (
             build_selective_session_bundle,
@@ -212,7 +229,7 @@ def _pre_llm_context(active_engine, recall_policy: str, payload: dict) -> dict:
         if route["route"] == "ordinary":
             # This branch deliberately performs no recall, session load, or
             # auxiliary-model call.  The ordinary policy bytes stay identical.
-            return {"context": recall_policy}
+            return baseline
 
         # Official Hermes hook payloads do not currently include answer-ready
         # refs.  Create that bounded baseline in product code when absent; the
@@ -277,7 +294,7 @@ def _pre_llm_context(active_engine, recall_policy: str, payload: dict) -> dict:
                 logger.warning("LCM selective compiler failed open: %s", exc)
     except Exception as exc:  # pragma: no cover - outer host safety net
         logger.warning("LCM pre-answer evidence failed open: %s", exc)
-        return {"context": recall_policy}
+        return baseline
     try:
         active_engine._last_preanswer_evidence_trace = (
             {
@@ -299,8 +316,8 @@ def _pre_llm_context(active_engine, recall_policy: str, payload: dict) -> dict:
         if isinstance(value, str) and value:
             augmentations.append(value)
     if not augmentations:
-        return {"context": recall_policy}
-    return {"context": f"{recall_policy}\n\n" + "\n\n".join(augmentations)}
+        return baseline
+    return {"context": "\n\n".join(filter(None, (recall_policy, *augmentations)))}
 
 
 def _session_context_value(name: str) -> str:
@@ -391,6 +408,33 @@ def register(ctx):
     # Register as the context engine (replaces ContextCompressor)
     ctx.register_context_engine(engine)
 
+    register_rpc = getattr(ctx, "register_rpc", None)
+    if callable(register_rpc):
+        def session_settings(_params, *, session_id, **kwargs):
+            # The host authorizes this session. Never accept a lookup from the payload
+            # or send paths, model identifiers or user-supplied filtering patterns.
+            from .config import PROFILE_FIELD_TYPES, _hermes_config_path
+            if not session_id:
+                return None
+            active = resolve_active_lcm_engine(session_id=session_id)
+            if active is None or Path(active._hermes_home).resolve() != _hermes_config_path().parent.resolve():
+                return None
+            configured = LCMConfig.from_env()
+            scalars, matches = {}, {}
+            for key, typ in PROFILE_FIELD_TYPES.items():
+                value = getattr(active._config, key)
+                if typ in (bool, float, int):
+                    scalars[key] = value
+                else:
+                    matches[key] = value == getattr(configured, key)
+            return {"session_id": session_id, "loaded": scalars, "matches": matches,
+                    "context_threshold": active.context_threshold}
+
+        try:
+            register_rpc("session_settings", session_settings)
+        except Exception as exc:
+            logger.info("LCM live settings are unavailable on this host: %s", exc)
+
     # Ship the same recall contract through both Hermes plugin skill
     # registration (explicit qualified loads) and the installer's ordinary
     # profile skill link (normal discovery). Older hosts simply lack this
@@ -440,6 +484,22 @@ def register(ctx):
         try:
             recall_policy = get_recall_policy()
 
+            register_section = getattr(ctx, "register_system_prompt_section", None)
+            if callable(register_section):
+                def render_policy(info):
+                    session_id = str(info.get("session_id") or "")
+                    active = resolve_active_lcm_engine(session_id=session_id)
+                    if not session_id or active is None:
+                        return ""
+                    active._recall_policy_section_session = session_id
+                    return recall_policy
+
+                try:
+                    register_section("hermes-lcm-ledger.recall", render_policy,
+                                     position="after_memory", max_chars=len(recall_policy))
+                except Exception as exc:
+                    logger.info("LCM uses turn guidance on this host: %s", exc)
+
             def _on_pre_llm_call(**payload):
                 session_id = str(payload.get("session_id") or "")
                 conversation_id = str(
@@ -453,7 +513,13 @@ def register(ctx):
                 )
                 if active_engine is None or getattr(active_engine, "name", None) != "lcm":
                     return None
-                return _pre_llm_context(active_engine, recall_policy, payload)
+                section_rendered = session_id and (
+                    getattr(active_engine, "_recall_policy_section_session", None) == session_id
+                )
+                retained = section_rendered or _history_has_recall_policy(
+                    payload.get("conversation_history"), recall_policy
+                )
+                return _pre_llm_context(active_engine, "" if retained else recall_policy, payload)
 
             register_hook("pre_llm_call", _on_pre_llm_call)
         except Exception as exc:

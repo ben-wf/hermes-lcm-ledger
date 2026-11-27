@@ -377,7 +377,7 @@ def normalize_search_sort(sort: str | None) -> str:
     return normalized if normalized in {"recency", "relevance", "hybrid"} else "recency"
 
 
-def build_snippet(text: str, terms: List[str], width: int = 80) -> str:
+def build_snippet(text: str, terms: List[str], width: int = 80, *, mark_omissions: bool = True) -> str:
     content = (text or "")
     if not content:
         return ""
@@ -390,9 +390,9 @@ def build_snippet(text: str, terms: List[str], width: int = 80) -> str:
             start = max(0, idx - width // 2)
             end = min(len(content), idx + len(term) + width // 2)
             snippet = content[start:end]
-            if start > 0:
+            if mark_omissions and start > 0:
                 snippet = "..." + snippet
-            if end < len(content):
+            if mark_omissions and end < len(content):
                 snippet = snippet + "..."
             return snippet
-    return content[:width] + ("..." if len(content) > width else "")
+    return content[:width] + ("..." if mark_omissions and len(content) > width else "")

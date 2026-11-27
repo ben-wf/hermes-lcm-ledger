@@ -651,10 +651,34 @@ def test_repair_without_rebuild_still_clears_integrity_failed_flag(tmp_path, mon
     assert db_bootstrap.load_integrity_failed(conn, spec) is not None
 
     # Index is healthy: repair makes no rebuild but must still clear the flag.
-    repaired = db_bootstrap.repair_external_content_fts(conn, spec, throttle=True)
+    repaired = db_bootstrap.repair_external_content_fts(conn, spec, throttle=False)
     assert repaired["rebuilt"] is False
     assert db_bootstrap.load_integrity_failed(conn, spec) is None
     conn.close()
+
+
+@pytest.mark.parametrize("check", ["skipped", "pending", "unchecked"])
+def test_inconclusive_check_preserves_known_fts_failure(tmp_path, monkeypatch, check):
+    conn = _make_conn(tmp_path)
+    spec = _spec()
+    try:
+        ensure_external_content_fts(conn, spec)
+        conn.execute("UPDATE messages SET content='drifted token' WHERE rowid=1")
+        conn.commit()
+        assert db_bootstrap.check_external_content_fts_integrity(conn, spec)["status"] == "fail"
+        db_bootstrap._record_integrity_failed(conn, spec, detail="known drift")
+        conn.commit()
+        monkeypatch.setenv(INTERVAL_ENV, "-1" if check == "skipped" else "0")
+        monkeypatch.setenv("LCM_FTS_INTEGRITY_BACKGROUND", "true" if check == "pending" else "false")
+        if check == "pending":
+            monkeypatch.setattr(db_bootstrap, "_dispatch_background_integrity_scan", lambda *a, **kw: True)
+        if check == "unchecked":
+            monkeypatch.setattr(db_bootstrap, "check_external_content_fts_integrity",
+                                lambda *a: {"status": "unchecked", "detail": "busy"})
+        ensure_external_content_fts(conn, spec)
+        assert db_bootstrap.load_integrity_failed(conn, spec)["detail"] == "known drift"
+    finally:
+        conn.close()
 
 
 class _RaisingConn:

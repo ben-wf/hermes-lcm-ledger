@@ -1,13 +1,22 @@
 """Tests for /lcm rotate command surface and engine rotate path."""
 
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 import importlib
 import os
 import re
+import sqlite3
+import subprocess
+import sys
+import threading
 from pathlib import Path
+
+import pytest
 
 from hermes_lcm.command import handle_lcm_command
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
+from hermes_lcm.maintenance import backup_database
 
 
 def _build_engine(tmp_path, *, fresh_tail_count: int = 3) -> LCMEngine:
@@ -354,6 +363,150 @@ def test_rotate_apply_aborts_and_preserves_state_when_backup_write_fails(tmp_pat
     assert state.current_frontier_store_id == 0
 
 
+@pytest.mark.parametrize("owner", ["_dag", "_lifecycle"])
+def test_backup_does_not_commit_another_owners_unpublished_work(tmp_path, owner):
+    engine = _build_engine(tmp_path)
+    transaction = getattr(engine, owner).connection
+    try:
+        transaction.execute("BEGIN IMMEDIATE")
+        transaction.execute("INSERT INTO metadata(key, value) VALUES ('draft', 'unpublished')")
+        snapshot = backup_database(engine)
+        assert snapshot["ok"]
+        assert transaction.in_transaction
+        with closing(sqlite3.connect(snapshot["backup_path"])) as saved:
+            assert saved.execute("SELECT value FROM metadata WHERE key='draft'").fetchone() is None
+    finally:
+        transaction.rollback()
+        engine.shutdown()
+
+
+def test_online_rotate_allows_ingest_and_advances_only_backed_up_frontier(tmp_path, monkeypatch):
+    engine = _build_engine(tmp_path)
+    _seed_messages(engine, count=10)
+    # Force multiple genuine SQLite backup steps with a WAL-mode source.
+    conn = engine._store.connection
+    conn.execute("CREATE TABLE filler(blob BLOB)")
+    conn.execute("INSERT INTO filler VALUES (zeroblob(4194304))")
+    conn.commit()
+    copying = threading.Event()
+    resume = threading.Event()
+    connect = sqlite3.connect
+
+    class PausedSource(sqlite3.Connection):
+        def backup(self, dest, *, pages):
+            def progress(status, remaining, total):
+                if remaining and not copying.is_set():
+                    copying.set()
+                    assert resume.wait(8)
+
+            return super().backup(dest, pages=pages, progress=progress)
+
+    def connect_with_pause(path, *args, **kwargs):
+        if kwargs.get("uri") and str(path).endswith("?mode=ro"):
+            kwargs["factory"] = PausedSource
+        return connect(path, *args, **kwargs)
+
+    monkeypatch.setattr(sqlite3, "connect", connect_with_pause)
+    try:
+        with ThreadPoolExecutor(2) as pool:
+            rotating = pool.submit(handle_lcm_command, "rotate apply", engine)
+            try:
+                assert copying.wait(5)
+                ingest = pool.submit(engine._store.append, "live-session", {"role": "user", "content": "new"})
+                assert ingest.result(timeout=3) > 0
+            finally:
+                resume.set()
+            result = rotating.result(timeout=5)
+        assert _extract_field(result, "status") == "ok"
+        assert _extract_field(result, "new_frontier_store_id") == "7"
+        with closing(connect(engine.rotate_backup_path())) as saved:
+            assert saved.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 10
+            assert saved.execute("SELECT current_frontier_store_id FROM lcm_lifecycle_state").fetchone()[0] == 0
+        assert engine._store.get_session_count("live-session") == 11
+    finally:
+        engine.shutdown()
+
+
+def test_overlapping_rotate_applies_keep_original_recovery_point(tmp_path, monkeypatch):
+    first = _build_engine(tmp_path)
+    second = _build_engine(tmp_path)
+    _seed_messages(first, count=10)
+    copying = threading.Event()
+    resume = threading.Event()
+    backup = first._store.backup
+
+    def paused_backup(dest):
+        copying.set()
+        assert resume.wait(8)
+        backup(dest)
+
+    monkeypatch.setattr(first._store, "backup", paused_backup)
+    try:
+        with ThreadPoolExecutor(2) as pool:
+            first_apply = pool.submit(handle_lcm_command, "rotate apply", first)
+            try:
+                assert copying.wait(5)
+                second_apply = pool.submit(handle_lcm_command, "rotate apply", second)
+            finally:
+                resume.set()
+            assert _extract_field(first_apply.result(timeout=5), "status") == "ok"
+            assert _extract_field(second_apply.result(timeout=5), "status") == "noop"
+        with closing(sqlite3.connect(first.rotate_backup_path())) as saved:
+            assert saved.execute("SELECT current_frontier_store_id FROM lcm_lifecycle_state").fetchone()[0] == 0
+    finally:
+        first.shutdown()
+        second.shutdown()
+
+
+@pytest.mark.parametrize("shared_source", [True, False], ids=["same-source", "same-slot"])
+def test_rotation_locks_survive_profile_boundaries_and_release_after_process_death(tmp_path, shared_source):
+    engine = _build_engine(tmp_path)
+    _seed_messages(engine, count=10)
+    script = """
+from pathlib import Path
+import sys, types
+pkg = types.ModuleType('hermes_lcm')
+pkg.__path__ = [sys.argv[1]]
+sys.modules['hermes_lcm'] = pkg
+from hermes_lcm.maintenance import rotation_backup_slot
+source, slot = map(Path, sys.argv[2:])
+engine = types.SimpleNamespace(_store=types.SimpleNamespace(db_path=source), rotate_backup_path=lambda: slot)
+with rotation_backup_slot(engine):
+    slot.with_name(slot.name + '.tmp').write_bytes(b'interrupted copy')
+    print('locked', flush=True)
+    sys.stdin.read()
+"""
+    source = engine._store.db_path if shared_source else tmp_path / "other.db"
+    slot = tmp_path / "other-profile" / "latest.sqlite3" if shared_source else engine.rotate_backup_path()
+    engine.rotate_backup_path().parent.mkdir(parents=True)
+    engine.rotate_backup_path().write_bytes(b"previous snapshot")
+    child = subprocess.Popen([sys.executable, "-c", script, str(Path(__file__).resolve().parents[1]),
+                              str(source), str(slot)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    try:
+        assert child.stdout.readline().strip() == "locked"
+        with ThreadPoolExecutor(1) as pool:
+            command = pool.submit(handle_lcm_command, "rotate apply", engine)
+            try:
+                with pytest.raises(TimeoutError):
+                    command.result(timeout=0.15)
+                assert engine.rotate_backup_path().read_bytes() == b"previous snapshot"
+            finally:
+                child.kill()
+                child.wait(timeout=5)
+            assert _extract_field(command.result(timeout=5), "status") == "ok"
+        with closing(sqlite3.connect(engine.rotate_backup_path())) as recovered:
+            assert recovered.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+        if not shared_source:
+            assert not slot.with_name(slot.name + ".tmp").exists()
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=5)
+        child.stdin.close()
+        child.stdout.close()
+        engine.shutdown()
+
+
 def test_rotate_apply_reports_stale_lifecycle_state_when_session_drifts(tmp_path):
     """advance_frontier silently returns the unchanged state when the lifecycle
     row's current_session_id no longer matches this engine's session. rotate
@@ -373,9 +526,8 @@ def test_rotate_apply_reports_stale_lifecycle_state_when_session_drifts(tmp_path
     assert "status: refused" in result
     assert "reason: stale_lifecycle_state" in result
 
-    # The rolling backup WAS written (we passed preflight) — that's expected
-    # with the current ordering. Lifecycle frontier should NOT have advanced
-    # for "live-session".
+    assert not engine.rotate_backup_path().exists()
+    # The stale session must not advance the currently bound conversation.
     state = engine._lifecycle.get_by_conversation(engine._conversation_id)
     assert state is not None
     assert state.current_frontier_store_id == 0

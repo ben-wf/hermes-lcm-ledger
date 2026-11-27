@@ -49,7 +49,7 @@ hermes config get context.engine
 
 In the new session, ask Hermes to run `lcm_status`. Its runtime identity
 shows the plugin name, version and database path. The first release
-candidate is **hermes-lcm-ledger v0.1.0-rc.1 (15 tools)**.
+candidate is **hermes-lcm-ledger v0.1.0-rc.2 (15 tools)**.
 
 ### Updates
 
@@ -210,10 +210,11 @@ LCM Ledger registers its bundled skill as
 recall and session lifecycle. The [skill source](skills/hermes-lcm-ledger/SKILL.md)
 includes the detailed references.
 
-When LCM is the active context engine for a bound session, the plugin registers
-one deterministic `pre_llm_call` hook. Hermes injects the canonical policy into
-the current user-message context, not the system prompt, preserving the stable
-system-prompt cache prefix. The policy:
+When Ledger serves a bound session, compatible Hermes hosts freeze its recall
+policy into the session's system prompt. On older hosts or sessions resumed
+from an earlier prompt, Ledger supplies the guidance on a turn when the retained
+history lacks a previous injection. Question-specific evidence still belongs
+to the current turn. The policy:
 
 - treats summaries as recall cues rather than exact proof;
 - prefers newer source-backed evidence and verifies contradictions;
@@ -296,13 +297,17 @@ Open **Settings → Plugins → LCM Ledger**. On the first install or upgrade,
 enable Ledger's **Desktop** component in **Capabilities → Plugins** if prompted.
 The page names the connected profile and shows each setting's resolved value
 and source. Use **Refresh** to reread the profile. Automatic archive paths
-appear in the empty path fields. A running chat may apply a model-specific
-threshold or select a model for an individual call.
+appear in the empty path fields. For a focused Ledger chat on the same gateway
+and profile, the page also shows the loaded numeric and boolean engine settings,
+including any model-specific context threshold. For text, lists and maps it
+reports whether the chat matches the gateway profile. Startup-only options and
+sessions without a reachable live engine show profile values only.
 
 **Save changes** writes only the fields you edit, using Hermes' normal profile
 settings writer. Saved values take priority over their `LCM_*` variables.
 Remove a saved key from `plugins.entries.hermes-lcm-ledger.settings` to
-inherit again. New processes load the new configuration. The built-in **Agent
+inherit again. Restart the Hermes process serving the profile to load changes.
+Opening a new chat can reuse an engine already loaded by that process. The built-in **Agent
 settings** subpage remains available for manual overrides and shows manifest
 defaults for unset fields.
 

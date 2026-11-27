@@ -744,9 +744,21 @@ class LifecycleStateStore:
         assert conn is not None
         protected = {str(s) for s in (protected_session_ids or ()) if s}
 
+        candidates = "SELECT conversation_id, current_session_id, last_finalized_session_id FROM lcm_lifecycle_state"
+        params = {}
+        if max_age_hours is not None:
+            params["cutoff"] = time.time() - float(max_age_hours) * 3600.0
+            candidates += """
+                WHERE COALESCE(NULLIF(current_bound_at, 0), NULLIF(last_finalized_at, 0),
+                               updated_at, :cutoff) <= :cutoff
+            """
+            # New sessions are common on bind. Avoid reserving a write lock
+            # when none are old enough, then recheck inside the transaction.
+            if conn.execute(candidates + " LIMIT 1", params).fetchone() is None:
+                return 0
+
         conn.execute("BEGIN IMMEDIATE")
         try:
-            sessions_with_data: set[str] = set()
             tables = {
                 row[0] for row in conn.execute(
                     "SELECT name FROM sqlite_master WHERE type='table'"
@@ -768,53 +780,15 @@ class LifecycleStateStore:
                     return True
                 return False
 
-            if "messages" in tables:
-                for row in conn.execute(
-                    "SELECT DISTINCT session_id FROM messages"
-                ).fetchall():
-                    sessions_with_data.add(str(row[0]))
-            if "summary_nodes" in tables:
-                for row in conn.execute(
-                    "SELECT DISTINCT session_id FROM summary_nodes"
-                ).fetchall():
-                    sessions_with_data.add(str(row[0]))
-
-            now = time.time()
-            max_age_seconds = (
-                float(max_age_hours) * 3600.0
-                if max_age_hours is not None
-                else None
-            )
             deleted = 0
-
-            rows = conn.execute(
-                "SELECT * FROM lcm_lifecycle_state"
-            ).fetchall()
+            rows = conn.execute(candidates, params).fetchall()
             for row in rows:
                 cur = str(row["current_session_id"] or "")
                 fin = str(row["last_finalized_session_id"] or "")
 
-                if ((cur and cur in sessions_with_data)
-                        or (fin and fin in sessions_with_data)):
+                if cur in protected or fin in protected:
                     continue
-
-                refs = {r for r in (cur, fin) if r}
-                if refs & protected:
-                    continue
-
-                if max_age_seconds is not None:
-                    row_age = (
-                        row["current_bound_at"]
-                        or row["last_finalized_at"]
-                        or row["updated_at"]
-                    )
-                    if row_age is not None and (now - float(row_age)) < max_age_seconds:
-                        continue
-
-                # Recheck against the tables right before deletion. BEGIN
-                # IMMEDIATE blocks concurrent writers while this transaction is
-                # open; this fresh query also keeps the safety check honest if
-                # the broad snapshot logic above changes later.
+                # BEGIN IMMEDIATE protects both these checks and the deletion.
                 if _session_has_data(cur) or _session_has_data(fin):
                     continue
 

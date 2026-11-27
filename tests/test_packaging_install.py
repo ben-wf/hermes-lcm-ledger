@@ -442,7 +442,7 @@ def test_plugin_entrypoint_registers_lcm_context_engine():
     identity = engine.get_status()["runtime_identity"]
     repo_root = Path(__file__).resolve().parent.parent
     assert identity["plugin_name"] == "hermes-lcm-ledger"
-    assert identity["plugin_version"] == "0.1.0-rc.1"
+    assert identity["plugin_version"] == "0.1.0-rc.2"
     assert Path(identity["plugin_path"]) == repo_root
     assert identity["database_path_source"] in {"config.database_path", "hermes_home", "default_home"}
     assert identity["plugin_git_commit"]
@@ -614,6 +614,67 @@ def test_plugin_entrypoint_registers_bundled_skill_and_active_lcm_recall_policy(
     ctx.engine.shutdown()
 
 
+def test_static_policy_and_legacy_replay(tmp_path, monkeypatch):
+    module = _load_plugin_entrypoint_module("hermes_lcm_packaging_static_policy")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("LCM_DATABASE_PATH", str(tmp_path / "ledger.db"))
+    hooks, sections, rpcs = {}, {}, {}
+
+    class Ctx:
+        def register_context_engine(self, engine):
+            self.engine = engine
+
+        def register_hook(self, name, callback):
+            hooks[name] = callback
+
+        def register_system_prompt_section(self, name, render, **kwargs):
+            sections[name] = render
+
+        def register_rpc(self, name, callback):
+            rpcs[name] = callback
+
+    ctx = Ctx()
+    module.register(ctx)
+    policy = module.get_recall_policy()
+    render = sections["hermes-lcm-ledger.recall"]
+    hook = hooks["pre_llm_call"]
+    runtime = rpcs["session_settings"]
+    try:
+        assert render({"session_id": "unbound"}) == ""
+        ctx.engine.on_session_start("resumed", platform="cli")
+        history = []
+        for i in range(20):
+            question = "Frage " + str(i)
+            row = {"role": "user", "content": question}
+            current = hook(session_id="resumed", conversation_history=history + [row])
+            if i == 0:
+                assert current == {"context": policy}
+                row["api_content"] = question + "\n\n" + policy
+            else:
+                assert current == {}
+            history.append(row)
+        assert sum(row.get("api_content", "").count(policy) for row in history) == 1
+        assert hook(session_id="resumed", conversation_history=[]) == {"context": policy}
+        quoted = {"role": "user", "content": policy, "api_content": policy + "\n\nother"}
+        assert hook(session_id="resumed", conversation_history=[quoted]) == {"context": policy}
+        assert render({"session_id": "resumed"}) == policy
+        assert hook(session_id="resumed", conversation_history=[]) == {}
+
+        loaded = ctx.engine._config.context_threshold
+        monkeypatch.setenv("LCM_CONTEXT_THRESHOLD", "0.62")
+        monkeypatch.setenv("LCM_SENSITIVE_PATTERNS", "private-expression")
+        assert runtime({"session_id": "resumed"}, session_id=None) is None
+        assert runtime({}, session_id="unbound") is None
+        snapshot = runtime({}, session_id="resumed")
+        assert snapshot["loaded"]["context_threshold"] == loaded != 0.62
+        assert snapshot["matches"]["sensitive_patterns"] is False
+        assert "private-expression" not in str(snapshot)
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "different-profile"))
+        assert runtime({}, session_id="resumed") is None
+    finally:
+        ctx.engine.shutdown()
+
+
 def test_pre_llm_hook_disabled_toolset_is_identical_and_routed_adds_exact_session_evidence(
     tmp_path, monkeypatch
 ):
@@ -682,6 +743,13 @@ def test_pre_llm_hook_disabled_toolset_is_identical_and_routed_adds_exact_sessio
     ), ctx.engine._last_preanswer_evidence_trace
     assert "Denver" in active["context"]
     assert f"lcm:{current_id}:0-{len(current_text)}" in active["context"]
+    retained = hook(
+        session_id="active-session", user_message="Where do I live now?",
+        baseline_refs=[{"exact_ref": f"lcm:{source_id}:0-{len(source_text)}", "quote": source_text}],
+        conversation_history=[{"role": "user", "content": "prior",
+                               "api_content": "prior\n\n" + policy, "timestamp": 1_712_361_600}],
+    )
+    assert retained["context"] == active["context"].removeprefix(policy + "\n\n")
     trace = ctx.engine._last_preanswer_evidence_trace
     assert trace["status"] == "augmented"
     assert trace["provenance"]["selector_calls"] == 0

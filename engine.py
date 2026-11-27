@@ -472,6 +472,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
 
         # Track which store_ids have been ingested into the DAG
         self._last_compacted_store_id: int = 0
+        self._rotation_checkpoint: tuple[str, str, int] | None = None
 
         # Cursor: index in the current messages list up to which all
         # messages have been persisted.  After compress() shortens the
@@ -1876,6 +1877,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         self._conversation_id = state.conversation_id
         self._lcm_session_last_conversation_id[session_id] = state.conversation_id
         self._last_compacted_store_id = state.current_frontier_store_id
+        self._rotation_checkpoint = None
         self._register_active_engine_binding()
         if not self._session_ignored and not self._session_stateless:
             self._remember_foreground_rebind_candidate(session_id)
@@ -5702,8 +5704,8 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         # the deepest existing node + 1, so condensation can always
         # create the next depth level.
         if max_depth < 0:
-            all_nodes = self._dag.get_session_nodes(self._session_id)
-            upper = (max(n.depth for n in all_nodes) + 1) if all_nodes else 1
+            depths = self._dag.get_session_depths(self._session_id)
+            upper = depths[-1] + 1 if depths else 0
         else:
             upper = max_depth
 
@@ -5813,14 +5815,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
 
     def _summary_frontier_nodes(self) -> List[SummaryNode]:
         """Return all provider-visible summary frontier nodes for the active session."""
-        all_nodes = self._dag.get_session_nodes(self._session_id, limit=100_000)
-        referenced = {
-            source_id
-            for node in all_nodes
-            if node.source_type == "nodes"
-            for source_id in node.source_ids
-        }
-        return [node for node in all_nodes if node.node_id not in referenced]
+        return self._dag.get_frontier_nodes(self._session_id)
 
     def _summary_frontier_tokens(self) -> int:
         return sum(node.token_count for node in self._summary_frontier_nodes())
@@ -6227,26 +6222,20 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         # Node ids placed in the summary prefix — used to dedupe proactive-recall
         # injection against summaries already visible in the active context.
         active_summary_node_ids: set = set()
-        all_nodes = self._dag.get_session_nodes(self._session_id)
-        if all_nodes:
-            # Group by depth, take the most recent uncondensed at each level
-            # For active context, we want the highest-level summaries
-            # that haven't been condensed into even higher levels
-            depths = sorted(set(n.depth for n in all_nodes), reverse=True)
-            for d in depths:
-                uncondensed = self._dag.get_uncondensed_at_depth(self._session_id, d)
-                for node in uncondensed:
-                    active_summary_node_ids.add(node.node_id)
-                    depth_label = {
-                        0: "Recent",
-                        1: "Session Arc",
-                        2: "Durable",
-                    }.get(d, f"Depth-{d}")
-                    summary_parts.append(
-                        f"[{depth_label} Summary (d{d}, node {node.node_id})]\n"
-                        f"{node.summary}\n"
-                        f"[Expand for details: {node.expand_hint}]"
-                    )
+        for d in reversed(self._dag.get_session_depths(self._session_id)):
+            uncondensed = self._dag.get_uncondensed_at_depth(self._session_id, d)
+            for node in uncondensed:
+                active_summary_node_ids.add(node.node_id)
+                depth_label = {
+                    0: "Recent",
+                    1: "Session Arc",
+                    2: "Durable",
+                }.get(d, f"Depth-{d}")
+                summary_parts.append(
+                    f"[{depth_label} Summary (d{d}, node {node.node_id})]\n"
+                    f"{node.summary}\n"
+                    f"[Expand for details: {node.expand_hint}]"
+                )
 
         if summary_parts:
             selected_parts = summary_parts
@@ -6688,9 +6677,8 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
           count (concurrent deletion race); rotate cannot compute a boundary.
         - ``frontier_already_ahead``: lifecycle frontier is already at or
           past the proposed new frontier; rotate is a no-op.
-        - ``stale_lifecycle_state``: apply requested but lifecycle's
-          ``current_session_id`` did not match this engine's session, so
-          ``advance_frontier`` did not persist the change.
+        - ``stale_lifecycle_state``: the current lifecycle binding does not
+          match the session selected for rotation.
         """
         session_id = self._session_id
         conversation_id = self._conversation_id
@@ -6711,7 +6699,9 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         effective_fresh_tail_count = len(tail)
 
         state = self._lifecycle.get_by_conversation(conversation_id)
-        current_frontier = int(state.current_frontier_store_id) if state else 0
+        if state is None or state.current_session_id != session_id:
+            return {"ok": False, "reason": "stale_lifecycle_state", "session_id": session_id}
+        current_frontier = int(state.current_frontier_store_id)
 
         base = {
             "ok": True,
@@ -6771,9 +6761,22 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         if not apply:
             return result
 
-        if is_noop:
-            return result
+        return self.apply_rotation_preview(result)
 
+    def apply_rotation_preview(self, result: dict[str, Any]) -> dict[str, Any]:
+        """Advance only the session and frontier captured before the backup."""
+        result = {**result, "mode": "apply"}
+        if not result.get("ok") or result.get("noop"):
+            return result
+        session_id = result["session_id"]
+        conversation_id = result["conversation_id"]
+        new_frontier = result["new_frontier_store_id"]
+        current_frontier = result["current_frontier_store_id"]
+        if (self._session_id, self._conversation_id) != (session_id, conversation_id):
+            return {**result, "ok": False, "reason": "stale_lifecycle_state"}
+        if self._session_ignored or self._session_stateless:
+            reason = "session_ignored" if self._session_ignored else "session_stateless"
+            return {**result, "ok": False, "reason": reason}
         new_state = self._lifecycle.advance_frontier(
             conversation_id,
             session_id,
@@ -6786,7 +6789,11 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         persisted_frontier = (
             int(new_state.current_frontier_store_id) if new_state else current_frontier
         )
-        if persisted_frontier < new_frontier:
+        if (
+            new_state is None
+            or new_state.current_session_id != session_id
+            or persisted_frontier < new_frontier
+        ):
             return {
                 **{k: v for k, v in result.items() if k != "ok"},
                 "ok": False,
@@ -6806,6 +6813,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         # advanced is the bootstrap signal for the next process start,
         # where _bind_lifecycle_state will read it into the marker
         # against a freshly-built active context.
+        self._rotation_checkpoint = (session_id, conversation_id, persisted_frontier)
         result["applied_frontier_store_id"] = persisted_frontier
         return result
 

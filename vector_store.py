@@ -1984,6 +1984,12 @@ class VectorStore:
             reader._conn = conn
             reader._write_lock = threading.RLock()
             reader._cache_lock = threading.RLock()
+            # This temporary connection owns only its private caches. Its
+            # finalizer must never clear the long-lived pooled store's LRUs.
+            reader._matrix_cache = OrderedDict()
+            reader._chunk_matrix_cache = OrderedDict()
+            reader._binary_matrix_cache = OrderedDict()
+            reader._chunk_binary_matrix_cache = OrderedDict()
             loaded = loader(reader)
             if _monotonic() >= deadline:
                 raise _PrescreenDeadlineExpired()

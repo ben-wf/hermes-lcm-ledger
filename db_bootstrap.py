@@ -2829,6 +2829,7 @@ def _fts_needs_rebuild(
     result = check_external_content_fts_integrity(conn, spec)
     if result["status"] == "pass":
         _record_integrity_checked(conn, spec, now=now)
+        _clear_integrity_failed(conn, spec)
     return result["status"] == "fail"
 
 
@@ -3033,7 +3034,6 @@ def repair_external_content_fts(
             # Return on the healthy fast path only while it is still complete;
             # any observed trigger repair must pass through write ownership below.
             if not _fts_missing_triggers(conn, spec):
-                _clear_integrity_failed(conn, spec)
                 conn.commit()
                 return {
                     "rebuilt": False,
@@ -3100,9 +3100,7 @@ def repair_external_content_fts(
             # the next startup can skip the deep integrity-check within the
             # interval.
             _record_integrity_checked(conn, spec, now=now)
-        # A completed repair resolves any prior background-scan corruption flag:
-        # clear it in the SAME transaction that commits the rebuild.
-        _clear_integrity_failed(conn, spec)
+            _clear_integrity_failed(conn, spec)
 
     if not owns_transaction:
         # Preserve the helper's historical behavior for callers that supplied an

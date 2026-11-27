@@ -1461,7 +1461,8 @@ class MessageStore:
                role: str | None = None,
                time_from: float | None = None,
                time_to: float | None = None,
-               allow_operators: bool = False) -> List[Dict[str, Any]]:
+               allow_operators: bool = False,
+               verbatim_snippets: bool = False) -> List[Dict[str, Any]]:
         """FTS5 search across raw messages.
 
         Retrieval contract:
@@ -1493,6 +1494,7 @@ class MessageStore:
                 role=role,
                 time_from=time_from,
                 time_to=time_to,
+                verbatim_snippets=verbatim_snippets,
             )
 
         order_by = _build_search_order_by(
@@ -1506,9 +1508,10 @@ class MessageStore:
         max_rank_bonus = compute_directness_rank_bonus_upper_bound(terms, phrases) * 3e-7
         source_clause, source_args = _source_filter_clause("m.source", source)
         conversation_clause, conversation_args = _conversation_filter_clause("m.conversation_id", conversation_id)
+        snippet_markers = ("", "", "") if verbatim_snippets else (">>>", "<<<", "...")
         offset = 0
         scanned_rows = 0
-        results: list[Dict[str, Any]] = []
+        ranked: list[Dict[str, Any]] = []
         while True:
             try:
                 where = ["messages_fts MATCH ?"]
@@ -1533,17 +1536,19 @@ class MessageStore:
                     args.append(time_to)
                 args.extend([fetch_limit, offset])
                 with self._write_lock:
-                    rows = self._conn.execute(
+                    cursor = self._conn.cursor()
+                    cursor.row_factory = sqlite3.Row
+                    rows = cursor.execute(
                         f"""SELECT m.store_id, m.session_id, m.source, m.role, m.content, m.tool_call_id,
                                   m.tool_calls, m.tool_name, m.timestamp, m.token_estimate, m.pinned, m.conversation_id,
                                   m.ingested_at, m.observed_at, m.observed_at_source,
                                   rank as search_rank,
-                                  snippet(messages_fts, 0, '>>>', '<<<', '...', 40) as snippet
+                                  snippet(messages_fts, 0, ?, ?, ?, 40) as snippet
                            FROM messages_fts fts
                            JOIN messages m ON m.store_id = fts.rowid
                            WHERE {' AND '.join(where)}
                            ORDER BY {order_by} LIMIT ? OFFSET ?""",
-                        args,
+                        (*snippet_markers, *args),
                     ).fetchall()
                 scanned_rows += len(rows)
             except sqlite3.Error as exc:
@@ -1558,39 +1563,48 @@ class MessageStore:
                     role=role,
                     time_from=time_from,
                     time_to=time_to,
+                    verbatim_snippets=verbatim_snippets,
                 )
 
-            raw_primary_values: list[float] = []
-            for r in rows:
-                d = self._row_to_dict(r)
-                base_columns = _MESSAGE_SELECT_COLUMN_COUNT
-                d["search_rank"] = r[base_columns] if len(r) > base_columns else None
-                d["snippet"] = r[base_columns + 1] if len(r) > (base_columns + 1) else ""
-                d["_directness_score"] = _message_directness_score(d.get("role"), d.get("content"), terms, phrases)
-                if apply_directness_adjustment and d["search_rank"] is not None:
-                    rank_adjustment = max(float(d["_directness_score"]), 0.0)
-                    d["search_rank"] = float(d["search_rank"]) - (rank_adjustment * 3e-7)
-                raw_primary_values.append(_fts_primary_value(d, sort))
-                results.append(d)
-            results.sort(key=lambda result: _fts_result_sort_key(result, sort))
+            # Ranking needs only three fields and the adjusted rank. Decode full
+            # messages (including serialized tool calls) only for the winners.
+            for row in rows:
+                directness = _message_directness_score(row["role"], row["content"], terms, phrases)
+                rank = row["search_rank"]
+                if apply_directness_adjustment and rank is not None:
+                    rank = float(rank) - max(directness, 0.0) * 3e-7
+                candidate = {
+                    "role": row["role"], "timestamp": row["timestamp"],
+                    "_directness_score": directness, "search_rank": rank, "_row": row,
+                }
+                ranked.append(candidate)
+            ranked.sort(key=lambda result: _fts_result_sort_key(result, sort))
 
-            if not apply_directness_adjustment or len(rows) < fetch_limit or len(results) <= limit:
-                return results[:limit]
+            if not apply_directness_adjustment or len(rows) < fetch_limit or len(ranked) <= limit:
+                break
 
-            worst_visible_primary = _fts_primary_value(results[min(limit, len(results)) - 1], sort)
-            last_fetched_primary = raw_primary_values[-1]
-            best_unseen_primary = last_fetched_primary - max_rank_bonus
-            if best_unseen_primary > worst_visible_primary:
-                return results[:limit]
+            worst_visible_primary = _fts_primary_value(ranked[limit - 1], sort)
+            last_fetched_primary = _fts_primary_value(candidate, sort)
+            if last_fetched_primary - max_rank_bonus > worst_visible_primary or scanned_rows >= candidate_cap:
+                break
 
-            if scanned_rows >= candidate_cap:
-                return results[:limit]
-
+            # These orders are independent of wall time. A loser cannot return
+            # to the top N when new candidates are added, including stable ties.
+            if normalize_search_sort(sort) != "hybrid" and limit > 0:
+                del ranked[limit:]
             offset += len(rows)
-            remaining = candidate_cap - scanned_rows
-            if remaining <= 0:
-                return results[:limit]
-            fetch_limit = min(fetch_limit * 2, remaining)
+            del rows
+            fetch_limit = min(fetch_limit * 2, candidate_cap - scanned_rows)
+
+        results = []
+        for candidate in ranked[:limit]:
+            row = candidate["_row"]
+            result = self._row_to_dict(row)
+            result["search_rank"] = candidate["search_rank"]
+            result["_directness_score"] = candidate["_directness_score"]
+            result["snippet"] = row["snippet"]
+            results.append(result)
+        return results
 
     def _search_like(self, query: str, session_id: str | None = None,
                      limit: int = 20, sort: str | None = None,
@@ -1598,7 +1612,8 @@ class MessageStore:
                      conversation_id: str | None = None,
                      role: str | None = None,
                      time_from: float | None = None,
-                     time_to: float | None = None) -> List[Dict[str, Any]]:
+                     time_to: float | None = None,
+                     verbatim_snippets: bool = False) -> List[Dict[str, Any]]:
         # LIKE keeps every character the index cannot spell (emoji, punctuation)
         # because substring matching is the only way to find those rows.
         safe_query = sanitize_like_query(query)
@@ -1722,7 +1737,7 @@ class MessageStore:
                 if score <= 0:
                     continue
                 result["search_rank"] = -float(score)
-                result["snippet"] = build_snippet(content, terms)
+                result["snippet"] = build_snippet(content, terms, mark_omissions=not verbatim_snippets)
                 result["_fallback_score"] = float(score)
                 result["_directness_score"] = _message_directness_score(result.get("role"), content, terms, phrases)
                 results.append(result)
@@ -1897,12 +1912,25 @@ class MessageStore:
     def backup(self, dest: sqlite3.Connection) -> None:
         """Copy the store's database into the already-open ``dest`` connection.
 
-        Thin wrapper over ``sqlite3.Connection.backup`` so callers snapshot the
-        store without reaching its private connection. Requires a live
-        connection, matching direct ``_conn.backup(dest)`` use.
+        A file-backed WAL store can keep ingesting while a dedicated reader
+        copies a fixed snapshot. A private in-memory store has only one handle.
         """
         with self._write_lock:
-            self._conn.backup(dest)
+            if self._conn is None:
+                raise sqlite3.ProgrammingError("Cannot back up a closed message store")
+            if self._is_memory_database:
+                self._conn.backup(dest)
+                return
+            uri = self.db_path.resolve().as_uri() + "?mode=ro"
+            source = sqlite3.connect(uri, uri=True, timeout=SQLITE_BUSY_TIMEOUT_SECONDS)
+        try:
+            # Pin the source before the first batch. A steady stream of writes
+            # would otherwise restart the online backup on every new commit.
+            source.execute("BEGIN")
+            source.execute("SELECT rootpage FROM sqlite_schema LIMIT 1").fetchone()
+            source.backup(dest, pages=256)
+        finally:
+            source.close()
 
     # -- Lifecycle ----------------------------------------------------------
 

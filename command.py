@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from enum import Enum
@@ -47,7 +48,7 @@ from .presets import (
     suggest_preset_for_engine,
     unsupported_runtime_fields_text,
 )
-from .maintenance import backup_database, rotate_backup_database
+from .maintenance import backup_database, rotation_backup_slot
 from .assertion_rebuild import rebuild_assertions
 from .assertion_store import AssertionSchemaUnavailableError, AssertionStore
 from . import rollup_builder
@@ -818,11 +819,27 @@ def _rotate_text(engine) -> str:
 
 
 def _rotate_apply_text(engine) -> str:
-    # Pre-flight refusal AND noop check before touching disk. This avoids
-    # both writing a backup for a session that would refuse and overwriting
-    # the previous known-good rolling backup when the apply would be a no-op
-    # (e.g., idempotent rerun on an already-rotated session).
-    pre = engine.rotate_active_session(apply=False)
+    # Preserve read-only refusals and no-ops even when the backup directory
+    # is unavailable. A real apply rechecks after acquiring both file locks.
+    initial = engine.rotate_active_session(apply=False)
+    skipped = _rotate_skipped_text(initial)
+    if skipped is not None:
+        return skipped
+    with ExitStack() as stack:
+        try:
+            write_snapshot = stack.enter_context(rotation_backup_slot(engine))
+        except (OSError, sqlite3.Error) as exc:
+            return "\n".join([
+                "LCM rotate apply",
+                "status: error",
+                f"database_path: {engine._store.db_path}",
+                f"error: backup failed: {exc}",
+                "note: rotate apply aborted before any lifecycle mutation",
+            ])
+        return _rotate_apply_with_slot(engine, write_snapshot, initial)
+
+
+def _rotate_skipped_text(pre) -> str | None:
     if not pre.get("ok"):
         reason = pre.get("reason", "unknown")
         lines = [
@@ -858,7 +875,20 @@ def _rotate_apply_text(engine) -> str:
         ]
         return "\n".join(lines)
 
-    backup = rotate_backup_database(engine)
+    return None
+
+
+def _rotate_apply_with_slot(engine, write_snapshot, initial) -> str:
+    pre = engine.rotate_active_session(apply=False)
+    if pre.get("ok") and (pre["session_id"], pre["conversation_id"]) != (
+        initial["session_id"], initial["conversation_id"]
+    ):
+        pre = {**initial, "ok": False, "reason": "stale_lifecycle_state"}
+    skipped = _rotate_skipped_text(pre)
+    if skipped is not None:
+        return skipped
+
+    backup = write_snapshot()
     if not backup["ok"]:
         return "\n".join([
             "LCM rotate apply",
@@ -868,7 +898,7 @@ def _rotate_apply_text(engine) -> str:
             "note: rotate apply aborted before any lifecycle mutation",
         ])
 
-    result = engine.rotate_active_session(apply=True)
+    result = engine.apply_rotation_preview(pre)
     if not result.get("ok"):
         return "\n".join([
             "LCM rotate apply",

@@ -9,14 +9,17 @@ formatting, and the store/dag/lifecycle connection handling lives in one place.
 
 from __future__ import annotations
 
+from contextlib import closing, contextmanager
 from datetime import datetime
 import os
 from pathlib import Path
 import sqlite3
 import stat
+import tempfile
 from typing import Any
 
 from .sqlite_util import (
+    _SQLITE_SIDECAR_SUFFIXES,
     _prepare_private_sqlite_file,
     _restrict_existing_sqlite_artifacts,
 )
@@ -53,18 +56,17 @@ def _prepare_private_backup_directory(path: Path) -> None:
     finally:
         os.close(fd)
 
+
 def flush_engine_connections(engine) -> None:
-    """Commit pending writes on every SQLite connection the engine owns.
+    """Flush buffered work through its owners before opening the snapshot.
 
     Shared by ``backup_database`` (timestamped backup) and
     ``rotate_backup_database`` (rolling backup) so the connection-flush
     contract stays in one place.
     """
     engine._store.commit()
-    engine._dag._conn.commit()
-    lifecycle_conn = getattr(getattr(engine, "_lifecycle", None), "_conn", None)
-    if lifecycle_conn is not None:
-        lifecycle_conn.commit()
+    # DAG and lifecycle methods already commit their own work. A commit on
+    # either shared handle here could publish another thread's partial work.
     assertion_store = getattr(engine, "_assertions", None)
     if assertion_store is not None:
         # AssertionStore owns a multi-statement publication transaction. Its
@@ -87,89 +89,112 @@ def backup_database(engine) -> dict[str, Any]:
 
     backup_dir = engine.backup_dir()
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    backup_path = backup_dir / f"{db_path.stem}-{timestamp}.sqlite3"
-
     try:
         _prepare_private_backup_directory(backup_dir)
         flush_engine_connections(engine)
-        _prepare_private_sqlite_file(backup_path)
-
-        dest = sqlite3.connect(str(backup_path))
+        # Concurrent timestamped backups in the same second get separate files.
+        fd, name = tempfile.mkstemp(
+            prefix=f"{db_path.stem}-{timestamp}-", suffix=".sqlite3.tmp", dir=backup_dir
+        )
+        os.close(fd)
+        staging = Path(name)
+        backup_path = staging.with_suffix("")
         try:
-            engine._store.backup(dest)
+            backup_size = _copy_snapshot(engine, staging)
+            # A new name avoids replacing any earlier timestamped backup.
+            os.link(staging, backup_path)
         finally:
-            dest.close()
-        _restrict_existing_sqlite_artifacts(backup_path)
+            _discard_snapshot(staging)
     except (OSError, sqlite3.Error) as exc:
-        return {
-            "ok": False,
-            "db_path": db_path,
-            "error": str(exc),
-        }
+        return {"ok": False, "db_path": db_path, "error": str(exc)}
 
-    backup_size = backup_path.stat().st_size if backup_path.exists() else 0
-    return {
-        "ok": True,
-        "db_path": db_path,
-        "backup_path": backup_path,
-        "backup_size": backup_size,
-    }
+    return {"ok": True, "db_path": db_path, "backup_path": backup_path, "backup_size": backup_size}
+
+
+def _copy_snapshot(engine, path: Path) -> int:
+    with closing(sqlite3.connect(str(path))) as dest:
+        engine._store.backup(dest)
+        # Publish a self-contained database, including when the source uses WAL.
+        dest.execute("PRAGMA journal_mode=DELETE").fetchone()
+    _restrict_existing_sqlite_artifacts(path)
+    size = path.stat().st_size
+    if size == 0:
+        raise sqlite3.DatabaseError("empty SQLite backup")
+    return size
+
+
+def _discard_snapshot(path: Path) -> None:
+    for suffix in ("", *_SQLITE_SIDECAR_SUFFIXES):
+        path.with_name(path.name + suffix).unlink(missing_ok=True)
+
+
+@contextmanager
+def _rotation_lock(path: Path):
+    """Keep a stable lock inode. Closing the descriptor releases it on process exit."""
+    _prepare_private_sqlite_file(path)
+    fd = os.open(path, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        if os.name == "posix":
+            import fcntl
+
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        else:  # pragma: no cover - Windows fallback
+            import msvcrt
+
+            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+        yield
+    finally:
+        os.close(fd)
+
+
+@contextmanager
+def rotation_backup_slot(engine):
+    """Serialize the preflight, rolling backup and frontier update across engines.
+
+    Profiles can share a live database with different backup directories. Two
+    databases with the same stem can also share a destination. Acquire source
+    first and destination second throughout, without locking the live SQLite DB.
+    """
+    source = Path(engine._store.db_path).resolve()
+    slot = engine.rotate_backup_path()
+    with _rotation_lock(source.with_name(source.name + ".rotate.lock")):
+        _prepare_private_backup_directory(slot.parent)
+        with _rotation_lock(slot.with_name(slot.name + ".slot.lock")):
+            yield lambda: _write_rotate_snapshot(engine, slot)
+
+
+def _write_rotate_snapshot(engine, backup_path: Path) -> dict[str, Any]:
+    """Replace the rolling slot while the caller holds rotation_backup_slot."""
+    db_path = Path(engine._store.db_path)
+    tmp_path = backup_path.with_name(backup_path.name + ".tmp")
+    try:
+        if not db_path.exists():
+            raise FileNotFoundError("database file does not exist")
+        _restrict_existing_sqlite_artifacts(backup_path)
+        flush_engine_connections(engine)
+        # With exclusive slot ownership, this can only be an interrupted copy.
+        _discard_snapshot(tmp_path)
+        _prepare_private_sqlite_file(tmp_path)
+        try:
+            size = _copy_snapshot(engine, tmp_path)
+            tmp_path.replace(backup_path)
+            if os.name == "posix":
+                fd = os.open(backup_path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+        finally:
+            _discard_snapshot(tmp_path)
+    except (OSError, sqlite3.Error) as exc:
+        return {"ok": False, "db_path": db_path, "backup_path": backup_path, "error": str(exc)}
+    return {"ok": True, "db_path": db_path, "backup_path": backup_path, "backup_size": size}
 
 
 def rotate_backup_database(engine) -> dict[str, Any]:
-    """Write a rolling rotate-latest SQLite snapshot of the LCM store.
-
-    Atomic via tmp-then-rename so the slot is never half-written. Unlike
-    ``backup_database`` which produces timestamped files, this overwrites a
-    single rolling slot so disk usage stays bounded across repeated rotates.
-    """
-    db_path = Path(engine._store.db_path)
-    if not db_path.exists():
-        return {
-            "ok": False,
-            "db_path": db_path,
-            "error": "database file does not exist",
-        }
-
-    backup_path = engine.rotate_backup_path()
-    backup_dir = backup_path.parent
-    tmp_path = backup_path.with_name(backup_path.name + ".tmp")
-
+    """Write a serialized, atomic rolling snapshot without advancing the frontier."""
     try:
-        _prepare_private_backup_directory(backup_dir)
-        _restrict_existing_sqlite_artifacts(backup_path)
-        flush_engine_connections(engine)
-
-        if tmp_path.exists():
-            tmp_path.unlink()
-        _prepare_private_sqlite_file(tmp_path)
-        dest = sqlite3.connect(str(tmp_path))
-        try:
-            engine._store.backup(dest)
-        finally:
-            dest.close()
-        _restrict_existing_sqlite_artifacts(tmp_path)
-        # Atomic replace so the rolling slot is never half-written.
-        tmp_path.replace(backup_path)
-        _restrict_existing_sqlite_artifacts(backup_path)
+        with rotation_backup_slot(engine) as write_snapshot:
+            return write_snapshot()
     except (OSError, sqlite3.Error) as exc:
-        # Best-effort cleanup of the tmp file if something failed midway.
-        try:
-            if tmp_path.exists():
-                tmp_path.unlink()
-        except OSError:
-            pass
-        return {
-            "ok": False,
-            "db_path": db_path,
-            "backup_path": backup_path,
-            "error": str(exc),
-        }
-
-    backup_size = backup_path.stat().st_size if backup_path.exists() else 0
-    return {
-        "ok": True,
-        "db_path": db_path,
-        "backup_path": backup_path,
-        "backup_size": backup_size,
-    }
+        return {"ok": False, "db_path": Path(engine._store.db_path), "error": str(exc)}

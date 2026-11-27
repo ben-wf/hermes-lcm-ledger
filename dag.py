@@ -213,6 +213,18 @@ class SummaryDAG:
             CREATE INDEX IF NOT EXISTS idx_nodes_session_depth_node
                 ON summary_nodes(session_id, depth, node_id);
 
+            CREATE TABLE IF NOT EXISTS lcm_leaf_publications (
+                node_id INTEGER PRIMARY KEY,
+                input_digest TEXT NOT NULL,
+                source_session_id TEXT NOT NULL,
+                consumed_through INTEGER NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_lcm_leaf_input ON lcm_leaf_publications(input_digest);
+            CREATE TRIGGER IF NOT EXISTS lcm_leaf_publication_delete AFTER DELETE ON summary_nodes
+            BEGIN
+                DELETE FROM lcm_leaf_publications WHERE node_id = OLD.node_id;
+            END;
+
             CREATE TABLE IF NOT EXISTS metadata (
                 key TEXT PRIMARY KEY,
                 value TEXT
@@ -252,9 +264,48 @@ class SummaryDAG:
 
     # -- Write --------------------------------------------------------------
 
-    def add_node(self, node: SummaryNode) -> int:
-        """Insert a summary node and return its node_id."""
+    def add_node(
+        self,
+        node: SummaryNode,
+        *,
+        conversation_id: str | None = None,
+        expected_frontier: int = 0,
+        next_frontier: int = 0,
+        rotated_frontier: int = 0,
+        input_digest: str | None = None,
+    ) -> int:
+        """Publish a node, optionally advancing a bound leaf's checkpoint atomically.
+
+        A changed session or frontier means another writer won. Return zero in
+        that case and leave both the graph and the checkpoint untouched.
+        """
         def _insert_node() -> int:
+            if conversation_id:
+                cursor = self._conn.execute(
+                    """UPDATE lcm_lifecycle_state
+                       SET current_frontier_store_id = MAX(current_frontier_store_id, ?), updated_at = ?
+                       WHERE conversation_id = ? AND current_session_id = ?
+                         AND current_frontier_store_id = ?
+                         AND (? <= ? OR NOT EXISTS (
+                             SELECT 1 FROM summary_nodes n JOIN lcm_leaf_publications r ON r.node_id = n.node_id
+                             WHERE n.session_id = ? AND n.depth = 0 AND r.source_session_id = ?
+                               AND r.consumed_through > ?
+                         ))""",
+                    # A manual rotation can advance the restart checkpoint without consuming
+                    # the live prefix. Only a competing leaf publication should block it.
+                    (next_frontier, time.time(), conversation_id, node.session_id,
+                     max(expected_frontier, rotated_frontier), rotated_frontier, expected_frontier,
+                     node.session_id, node.session_id, expected_frontier),
+                )
+                if not cursor.rowcount:
+                    return 0
+            elif input_digest and not self._conn.in_transaction:
+                # Unbound engines have no lifecycle UPDATE to acquire the writer lock.
+                self._conn.execute("BEGIN IMMEDIATE")
+            if input_digest and next_frontier == expected_frontier:
+                previous = self.get_leaf_for_input(node.session_id, input_digest)
+                if previous:
+                    return previous.node_id
             cur = self._conn.execute(
                 """INSERT INTO summary_nodes
                    (session_id, depth, summary, token_count, source_token_count,
@@ -274,13 +325,18 @@ class SummaryDAG:
                     node.expand_hint,
                 ),
             )
-            self._conn.commit()
-            node.node_id = cur.lastrowid
-            return node.node_id
+            if input_digest:
+                self._conn.execute(
+                    """INSERT INTO lcm_leaf_publications(node_id, input_digest, source_session_id, consumed_through)
+                       VALUES (?, ?, ?, ?)""",
+                    (cur.lastrowid, input_digest, node.session_id, next_frontier),
+                )
+            return cur.lastrowid
 
         with self._db_lock:
             try:
-                return _insert_node()
+                with self._conn:
+                    node_id = _insert_node()
             except sqlite3.DatabaseError as exc:
                 if not is_fts_corruption_error(exc):
                     raise
@@ -293,7 +349,11 @@ class SummaryDAG:
                     build_nodes_fts_spec(),
                     force=True,
                 )
-                return _insert_node()
+                with self._conn:
+                    node_id = _insert_node()
+            if node_id:
+                node.node_id = node_id
+            return node_id
 
     @staticmethod
     def stage_delete_session_scope(
@@ -457,6 +517,43 @@ class SummaryDAG:
                 ).fetchall()
         return [self._row_to_node(r) for r in rows]
 
+    def get_leaf_for_input(self, session_id: str, input_digest: str) -> Optional[SummaryNode]:
+        """Find a published leaf for an exact replay that has no new source IDs."""
+        with self._db_lock:
+            row = self._conn.execute(
+                """SELECT n.* FROM lcm_leaf_publications r JOIN summary_nodes n
+                     ON n.node_id = r.node_id
+                   WHERE r.input_digest = ? AND n.session_id = ?
+                   ORDER BY r.node_id DESC LIMIT 1""",
+                (input_digest, session_id),
+            ).fetchone()
+        return self._row_to_node(row) if row else None
+
+    def get_session_depths(self, session_id: str) -> List[int]:
+        """Return every represented depth without materializing node payloads."""
+        with self._db_lock:
+            rows = self._conn.execute(
+                """SELECT DISTINCT depth FROM summary_nodes
+                   WHERE session_id = ? ORDER BY depth""",
+                (session_id,),
+            ).fetchall()
+        return [row[0] for row in rows]
+
+    def get_frontier_nodes(self, session_id: str) -> List[SummaryNode]:
+        """Read the full unreferenced frontier in condensation order."""
+        with self._db_lock:
+            rows = self._conn.execute(
+                """SELECT n.* FROM summary_nodes n
+                   WHERE n.session_id = ? AND n.node_id NOT IN (
+                       SELECT ref.value FROM summary_nodes p, json_each(p.source_ids) ref
+                       WHERE p.session_id = ? AND p.source_type = 'nodes'
+                         AND ref.type = 'integer'
+                   )
+                   ORDER BY n.depth, n.created_at, n.node_id""",
+                (session_id, session_id),
+            ).fetchall()
+        return [self._row_to_node(row) for row in rows]
+
     def get_session_node_ids_below_depth(
         self, session_id: str, min_depth: int | None
     ) -> List[int]:
@@ -532,13 +629,7 @@ class SummaryDAG:
         if per_depth_limit <= 0:
             return {}
         if depths is None:
-            depth_rows = self._conn.execute(
-                """SELECT DISTINCT depth FROM summary_nodes
-                   WHERE session_id = ?
-                   ORDER BY depth""",
-                (session_id,),
-            ).fetchall()
-            depths = [int(row[0]) for row in depth_rows]
+            depths = self.get_session_depths(session_id)
 
         samples: Dict[int, List[SummaryNode]] = {}
         for depth in depths:

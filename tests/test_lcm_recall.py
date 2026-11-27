@@ -1264,6 +1264,14 @@ def test_pooled_vector_store_survives_across_recall_calls(recall_engine, monkeyp
     store (and clearing the cache) every call."""
     import hermes_lcm.retrieval_core as rc
 
+    loads = []
+    load_matrix = VectorStore._load_matrix
+
+    def count_load(self, *args, **kwargs):
+        loads.append(None)
+        return load_matrix(self, *args, **kwargs)
+
+    monkeypatch.setattr(VectorStore, "_load_matrix", count_load)
     rc._reset_vector_store_pool()
     try:
         node = _add_summary(recall_engine, "kanban pooled cache", session_id="session-a", created_at=5.0)
@@ -1279,6 +1287,12 @@ def test_pooled_vector_store_survives_across_recall_calls(recall_engine, monkeyp
         _recall(recall_engine, monkeypatch, include="summaries", limit=5)
         # Same instance reused, not rebuilt.
         assert rc._vector_store_pool[key]["store"] is pooled
+        assert len(loads) == 1
+
+        # A write through another connection must still invalidate the matrix.
+        _seed_summary_vectors(recall_engine, [(node, [0.0, 1.0])])
+        _recall(recall_engine, monkeypatch, include="summaries", limit=5)
+        assert len(loads) == 2
     finally:
         rc._reset_vector_store_pool()
 
@@ -2912,3 +2926,138 @@ def test_reversible_rejection_stays_reachable_after_a_partial_refund():
     assert [e["hit"]["store_id"] for e in regained] == [3], (
         "a revisitable candidate must never become unreachable"
     )
+
+
+@pytest.mark.parametrize("query", ["citron", "火星"])
+def test_broad_fts_recall_keeps_verbatim_offsets_during_ingest_and_backup(recall_engine, query):
+    """Search and hydrate committed WAL rows even while ingest owns its lock."""
+    from concurrent.futures import ThreadPoolExecutor
+    from contextlib import closing
+    import sqlite3
+
+    recall_engine._config.embeddings_enabled = False
+    recall_engine._config.recall_query_timeout_s = 2.0
+    store = recall_engine._store
+    expected = {}
+    for i in range(18):
+        text = ("Frühstück " * 75) + f"🫖 ... >>>citron<<< 火星 #{i} ... " + ("Abend " * 74)
+        store_id = store.append(f"session-{i}", {"role": "user", "content": text})
+        expected[store_id] = text
+    args = {"query": query, "limit": len(expected)}
+    snippets = json.loads(lcm_tools.lcm_recall(args, engine=recall_engine))
+    ranked_ids = [hit["store_id"] for hit in snippets["hits"]]
+    assert set(ranked_ids) == set(expected)
+
+    # A second store models a backup in a separate gateway/process.
+    backup_store = MessageStore(store.db_path, ingest_protection_config=recall_engine._config)
+
+    def backup():
+        with closing(sqlite3.connect(":memory:")) as dest:
+            backup_store.backup(dest)
+            return dest.execute("SELECT count(*) FROM messages_fts WHERE messages_fts MATCH 'citron'").fetchone()[0]
+
+    try:
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            with store._write_lock:
+                store.connection.execute("BEGIN IMMEDIATE")
+                try:
+                    store.connection.execute("UPDATE messages SET content = 'pending edit'")
+                    snapshot = pool.submit(backup)
+                    result = pool.submit(
+                        lcm_tools.lcm_recall,
+                        {**args, "detail": "answer_ready", "include_occurrence_time": True},
+                        engine=recall_engine,
+                    )
+                    payload = json.loads(result.result(timeout=5))
+                    assert snapshot.result(timeout=5) == len(expected)
+                finally:
+                    store.connection.rollback()
+    finally:
+        backup_store.close()
+
+    assert [hit["store_id"] for hit in payload["hits"]] == ranked_ids
+    policy = payload["provenance"]["answer_ready"]
+    assert policy["unreferenced_dropped_count"] == 0
+    assert policy["expanded_hit_count"] == 8
+    for hit in payload["hits"]:
+        start, size = hit["content_offset"], hit["content_returned_chars"]
+        excerpt = hit.get("content", hit["snippet"])
+        assert expected[hit["store_id"]][start:start + size] == excerpt
+        assert "... >>>citron<<<" in excerpt
+        if "content" not in hit:
+            assert start > 0
+
+
+@pytest.mark.parametrize("order", ["recency", "relevance", "hybrid"])
+def test_fts_ties_materialize_only_winning_rows(recall_engine, monkeypatch, order):
+    """Stable ties across fetch batches preserve the same winning payloads."""
+    import hermes_lcm.store as store_module
+
+    store = recall_engine._store
+    store.append_batch(CURRENT, [
+        {"role": "assistant", "content": "citron", "tool_calls": [{"id": str(i)}]}
+        for i in range(160)
+    ])
+    store.connection.execute("UPDATE messages SET timestamp = 1700000000")
+    store.commit()
+    monkeypatch.setattr(time, "time", lambda: 1800000000)
+    all_hits = store.search("citron", sort=order, limit=160)
+    row_to_dict = store._row_to_dict
+    score = store_module._message_directness_score
+    materialized, scored = [], []
+
+    def count_rows(row):
+        materialized.append(row[0])
+        return row_to_dict(row)
+
+    def count_scores(*args):
+        scored.append(None)
+        return score(*args)
+
+    monkeypatch.setattr(store, "_row_to_dict", count_rows)
+    monkeypatch.setattr(store_module, "_message_directness_score", count_scores)
+    top = store.search("citron", sort=order, limit=4)
+    assert top == all_hits[:4]
+    assert len(scored) == len(all_hits) == 160
+    assert materialized == [hit["store_id"] for hit in top]
+
+
+def test_recall_window_uses_original_unicode_offsets():
+    text = "ß" * 500 + " Café Straße"
+    assert lcm_tools._content_offset_for_query_match(text, "STRASSE") == text.index("Straße")
+
+
+def test_in_memory_fts_answer_ready_uses_the_original_handles(recall_engine):
+    config = recall_engine._config
+    config.embeddings_enabled = False
+    store = MessageStore(":memory:", ingest_protection_config=config)
+    dag = SummaryDAG(":memory:")
+    try:
+        recall_engine._store = store
+        recall_engine._dag = dag
+        store.append(CURRENT, {"role": "user", "content": "fresh citron"})
+        payload = json.loads(lcm_tools.lcm_recall(
+            {"query": "citron", "detail": "answer_ready"}, engine=recall_engine
+        ))
+        assert [hit["content"] for hit in payload["hits"]] == ["fresh citron"]
+    finally:
+        store.close()
+        dag.close()
+
+def test_slow_vector_arm_leaves_time_to_deliver_fts_evidence(recall_engine, monkeypatch):
+    recall_engine._store.append(CURRENT, {"role": "user", "content": "citron"})
+    monotonic = time.monotonic
+    elapsed = [0.0]
+    monkeypatch.setattr(time, "monotonic", lambda: monotonic() + elapsed[0])
+
+    def exhausted(*args, deadline, **kwargs):
+        elapsed[0] += deadline - time.monotonic() + 0.001
+        raise TimeoutError("semantic search deadline exceeded")
+
+    monkeypatch.setattr(lcm_tools, "_lcm_recall_chunk_arm", exhausted)
+    payload = _recall(
+        recall_engine, monkeypatch, query="citron", detail="answer_ready", include="verbatim"
+    )
+    assert payload["timeout"] is True
+    assert payload["provenance"]["coverage"]["fts"] == "ok"
+    assert [hit["content"] for hit in payload["hits"]] == ["citron"]

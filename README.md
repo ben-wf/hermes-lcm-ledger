@@ -49,7 +49,14 @@ hermes config get context.engine
 
 In the new session, ask Hermes to run `lcm_status`. Its runtime identity
 shows the plugin name, version and database path. The stable release is
-**hermes-lcm-ledger v1.0.0 (15 tools)**. [Release notes](https://github.com/ben-wf/hermes-lcm-ledger/releases/tag/v1.0.0)
+**hermes-lcm-ledger v1.1.0 (15 tools)**. [Release notes](https://github.com/ben-wf/hermes-lcm-ledger/releases/tag/v1.1.0)
+
+### Compact an existing Ledger archive
+
+Version 1.1 serializes concurrent ingestion of the same session on both archive formats.
+For large archives, the optional compact format stores byte-identical tool responses of at least 256 bytes once. Every occurrence keeps its message ID and remains searchable and citable.
+
+Use the [archive conversion and rollback procedure](docs/operator-guide.md#compact-a-ledger-archive) to create a verified copy before switching profiles.
 
 ### Updates
 

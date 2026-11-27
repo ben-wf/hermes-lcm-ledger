@@ -6637,7 +6637,7 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
     # 1b. FTS5 integrity, separated from generic SQLite integrity so malformed
     # inverted indexes point at the exact table and repair path.
     for check_name, conn, spec in (
-        ("messages_fts_integrity", engine._store.connection, build_message_fts_spec()),
+        ("messages_fts_integrity", engine._store.connection, build_message_fts_spec(engine._store.connection)),
         ("nodes_fts_integrity", engine._dag.connection, build_nodes_fts_spec()),
     ):
         try:

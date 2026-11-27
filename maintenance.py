@@ -21,6 +21,7 @@ from typing import Any
 from .sqlite_util import (
     _SQLITE_SIDECAR_SUFFIXES,
     _prepare_private_sqlite_file,
+    private_file_lock as _rotation_lock,
     _restrict_existing_sqlite_artifacts,
 )
 
@@ -126,25 +127,6 @@ def _copy_snapshot(engine, path: Path) -> int:
 def _discard_snapshot(path: Path) -> None:
     for suffix in ("", *_SQLITE_SIDECAR_SUFFIXES):
         path.with_name(path.name + suffix).unlink(missing_ok=True)
-
-
-@contextmanager
-def _rotation_lock(path: Path):
-    """Keep a stable lock inode. Closing the descriptor releases it on process exit."""
-    _prepare_private_sqlite_file(path)
-    fd = os.open(path, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
-    try:
-        if os.name == "posix":
-            import fcntl
-
-            fcntl.flock(fd, fcntl.LOCK_EX)
-        else:  # pragma: no cover - Windows fallback
-            import msvcrt
-
-            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
-        yield
-    finally:
-        os.close(fd)
 
 
 @contextmanager

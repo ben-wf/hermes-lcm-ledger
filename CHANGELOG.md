@@ -2,6 +2,12 @@
 
 This repo also publishes GitHub Releases. This file is the repo-root release surface for operators who want the recent release arc without leaving the checkout.
 
+## v1.1.0 - 2026-11-27
+
+- Reconcile competing writers before appending a replayed session history.
+- Support optional shared storage for identical tool responses of 256 bytes or more. Conversion preserves message IDs, timestamps, full-text search and citation offsets.
+- Add a copy-and-verify conversion tool. Existing archives upgrade in place in their original format until explicitly converted.
+
 ## v1.0.0 - 2026-11-27
 
 First stable release of LCM Ledger. It promotes the RC2 runtime and archive

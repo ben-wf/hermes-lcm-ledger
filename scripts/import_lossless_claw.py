@@ -41,6 +41,7 @@ from hermes_lcm.dag import build_nodes_fts_spec  # noqa: E402
 from hermes_lcm.db_bootstrap import ensure_external_content_fts  # noqa: E402
 from hermes_lcm.ingest_protection import protect_message_for_ingest  # noqa: E402
 from hermes_lcm.message_content import normalize_content_value  # noqa: E402
+from hermes_lcm.packed_archive import ROWS, physical_messages, shared_content  # noqa: E402
 from hermes_lcm.store import MessageStore, _normalize_source_value  # noqa: E402
 from hermes_lcm.tokens import count_message_tokens  # noqa: E402
 
@@ -1041,22 +1042,32 @@ def _insert_import_candidate(
         session_id=candidate.target_session_id,
     )
     tool_calls_json = json.dumps(protected_msg.get("tool_calls")) if protected_msg.get("tool_calls") else None
+    table = physical_messages(conn)
+    role = protected_msg.get("role", candidate.role)
+    content = normalize_content_value(protected_msg.get("content"))
+    extra_column = extra_value = ""
+    extra_args = ()
+    if table == ROWS:
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
+        content, payload_id = shared_content(conn, role, content)
+        extra_column, extra_value, extra_args = ",payload_id", ",?", (payload_id,)
     cur = conn.execute(
-        """INSERT INTO messages
+        f"""INSERT INTO {table}
            (session_id, source, role, content, tool_call_id, tool_calls,
-            tool_name, timestamp, token_estimate, pinned)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
+            tool_name, timestamp, token_estimate, pinned{extra_column})
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0{extra_value})""",
         (
             candidate.target_session_id,
             _normalize_source_value(candidate.source),
-            protected_msg.get("role", candidate.role),
-            normalize_content_value(protected_msg.get("content")),
+            role,
+            content,
             protected_msg.get("tool_call_id"),
             tool_calls_json,
             protected_msg.get("tool_name"),
             candidate.timestamp,
             count_message_tokens(protected_msg),
-        ),
+        ) + extra_args,
     )
     store_id = int(cur.lastrowid)
     conn.execute(
@@ -2326,7 +2337,7 @@ def _existing_tool_call_ids_by_source_session(target_db: Path, import_id: str) -
         return {}
     conn = sqlite3.connect(target_db)
     try:
-        if not _target_has_import_table(conn) or not _table_exists(conn, "messages"):
+        if not _target_has_import_table(conn) or not _table_exists(conn, physical_messages(conn)):
             return {}
         import_columns = _table_columns(conn, "lcm_imported_messages")
         message_columns = _table_columns(conn, "messages")

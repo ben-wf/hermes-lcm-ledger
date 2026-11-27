@@ -34,6 +34,7 @@ from .db_bootstrap import (
     repair_external_content_fts,
     run_versioned_migrations,
 )
+from .packed_archive import ROWS, is_packed, packed_fts_triggers, shared_content
 from .config import LCMConfig
 from .ingest_protection import protect_message_for_ingest, protect_messages_for_ingest
 from .search_query import (
@@ -297,13 +298,13 @@ def _fts_primary_value(result: Dict[str, Any], sort: str | None) -> float:
     return rank_value
 
 
-def build_message_fts_spec() -> ExternalContentFtsSpec:
+def build_message_fts_spec(conn=None) -> ExternalContentFtsSpec:
     return ExternalContentFtsSpec(
         table_name="messages_fts",
         content_table="messages",
         content_rowid="store_id",
         indexed_column="content",
-        trigger_sqls=(
+        trigger_sqls=packed_fts_triggers() if conn is not None and is_packed(conn) else (
             """
             CREATE TRIGGER IF NOT EXISTS msg_fts_insert
                 AFTER INSERT ON messages BEGIN
@@ -372,6 +373,12 @@ class MessageStore:
         configure_connection(self._conn)
         if not self._is_memory_database:
             _restrict_existing_sqlite_artifacts(self.db_path)
+        self._message_table = ROWS if is_packed(self._conn) else "messages"
+        if self._message_table == ROWS:
+            ensure_external_content_fts(self._conn, build_message_fts_spec(self._conn))
+            run_versioned_migrations(self._conn)
+            self._conn.commit()
+            return
         self._conn.executescript("""
             CREATE TABLE IF NOT EXISTS messages (
                 store_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -402,7 +409,7 @@ class MessageStore:
         """)
         ensure_external_content_fts(
             self._conn,
-            build_message_fts_spec(),
+            build_message_fts_spec(self._conn),
         )
         run_versioned_migrations(self._conn)
         self._ensure_source_column()
@@ -476,6 +483,35 @@ class MessageStore:
 
     # -- Write operations ---------------------------------------------------
 
+    def _insert_message(self, session_id, msg, estimate, source, conversation_id):
+        role = msg.get("role", "unknown")
+        content = _normalize_content_value(msg.get("content"))
+        columns = "session_id,source,conversation_id,role,content,tool_call_id,tool_calls,tool_name,timestamp,token_estimate,pinned,ingested_at,observed_at,observed_at_source"
+        extra = ()
+        if self._message_table == ROWS:
+            if not self._conn.in_transaction:
+                self._conn.execute("BEGIN IMMEDIATE")
+            content, payload_id = shared_content(self._conn, role, content)
+            columns += ",payload_id"
+            extra = (payload_id,)
+        observed = _normalize_observed_at(msg.get("timestamp"))
+        now = time.time()
+        values = (
+            session_id, _normalize_source_value(source), _normalize_conversation_id_value(conversation_id),
+            role, content, msg.get("tool_call_id"), json.dumps(msg["tool_calls"]) if msg.get("tool_calls") else None,
+            msg.get("tool_name"), now, estimate, 0, now, observed, "host_message_timestamp" if observed is not None else None,
+        ) + extra
+        slots = ",".join("?" for _ in values)
+        return self._conn.execute(
+            f"INSERT INTO {self._message_table} ({columns}) VALUES ({slots})", values
+        ).lastrowid
+
+    def session_head(self, session_id):
+        with self._write_lock:
+            return self._conn.execute(
+                "SELECT max(store_id) FROM messages WHERE session_id=?", (session_id,)
+            ).fetchone()[0] or 0
+
     def append(self, session_id: str, msg: Dict[str, Any],
                token_estimate: int = 0, source: str = "",
                conversation_id: str = "") -> int:
@@ -486,41 +522,13 @@ class MessageStore:
             hermes_home=self._hermes_home,
             session_id=session_id,
         )
-        tool_calls = msg.get("tool_calls")
-        tc_json = json.dumps(tool_calls) if tool_calls else None
-        observed_at = _normalize_observed_at(msg.get("timestamp"))
-        ingested_at = time.time()
-
         def _insert_single() -> int:
             deadline: float | None = None
             delay = 0.01
             while True:
                 try:
-                    cur = self._conn.execute(
-                        """INSERT INTO messages
-                           (session_id, source, conversation_id, role, content, tool_call_id, tool_calls,
-                            tool_name, timestamp, token_estimate, pinned, ingested_at,
-                            observed_at, observed_at_source)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                        (
-                            session_id,
-                            _normalize_source_value(source),
-                            _normalize_conversation_id_value(conversation_id),
-                            msg.get("role", "unknown"),
-                            _normalize_content_value(msg.get("content")),
-                            msg.get("tool_call_id"),
-                            tc_json,
-                            msg.get("tool_name"),
-                            ingested_at,
-                            token_estimate,
-                            0,
-                            ingested_at,
-                            observed_at,
-                            "host_message_timestamp" if observed_at is not None else None,
-                        ),
-                    )
-                    self._conn.commit()
-                    return cur.lastrowid
+                    with self._conn:
+                        return self._insert_message(session_id, msg, token_estimate, source, conversation_id)
                 except sqlite3.OperationalError as exc:
                     msg_text = str(exc).lower()
                     now = time.monotonic()
@@ -574,7 +582,7 @@ class MessageStore:
                 )
                 repair_external_content_fts(
                     self._conn,
-                    build_message_fts_spec(),
+                    build_message_fts_spec(self._conn),
                     force=True,
                 )
                 return _insert_single()
@@ -622,34 +630,7 @@ class MessageStore:
                     batch_ids = []
                     with self._conn:
                         for msg, est in zip(messages, token_estimates):
-                            tc = msg.get("tool_calls")
-                            tc_json = json.dumps(tc) if tc else None
-                            ts = time.time()
-                            observed_at = _normalize_observed_at(msg.get("timestamp"))
-                            cur = self._conn.execute(
-                                """INSERT INTO messages
-                                   (session_id, source, conversation_id, role, content, tool_call_id, tool_calls,
-                                    tool_name, timestamp, token_estimate, pinned, ingested_at,
-                                    observed_at, observed_at_source)
-                                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                                (
-                                    session_id,
-                                    _normalize_source_value(source),
-                                    _normalize_conversation_id_value(conversation_id),
-                                    msg.get("role", "unknown"),
-                                    _normalize_content_value(msg.get("content")),
-                                    msg.get("tool_call_id"),
-                                    tc_json,
-                                    msg.get("tool_name"),
-                                    ts,
-                                    est,
-                                    0,
-                                    ts,
-                                    observed_at,
-                                    "host_message_timestamp" if observed_at is not None else None,
-                                ),
-                            )
-                            batch_ids.append(cur.lastrowid)
+                            batch_ids.append(self._insert_message(session_id, msg, est, source, conversation_id))
                     return batch_ids
                 except sqlite3.OperationalError as exc:
                     msg_text = str(exc).lower()
@@ -704,7 +685,7 @@ class MessageStore:
                 )
                 repair_external_content_fts(
                     self._conn,
-                    build_message_fts_spec(),
+                    build_message_fts_spec(self._conn),
                     force=True,
                 )
                 return _execute_batch()
@@ -715,7 +696,7 @@ class MessageStore:
             return 0
         with self._write_lock:
             cur = self._conn.execute(
-                "UPDATE messages SET session_id = ? WHERE session_id = ?",
+                f"UPDATE {self._message_table} SET session_id = ? WHERE session_id = ?",
                 (new_session_id, old_session_id),
             )
             self._conn.commit()
@@ -725,7 +706,7 @@ class MessageStore:
         """Delete all messages for a session. Returns count deleted."""
         with self._write_lock:
             cur = self._conn.execute(
-                "DELETE FROM messages WHERE session_id = ?",
+                f"DELETE FROM {self._message_table} WHERE session_id = ?",
                 (session_id,),
             )
             self._conn.commit()
@@ -765,8 +746,9 @@ class MessageStore:
                     "tool_call_id": tool_call_id,
                 }
             )
+            clear_payload = ", payload_id=NULL" if self._message_table == ROWS else ""
             self._conn.execute(
-                "UPDATE messages SET content = ?, token_estimate = ? WHERE store_id = ?",
+                f"UPDATE {self._message_table} SET content = ?, token_estimate = ?{clear_payload} WHERE store_id = ?",
                 (placeholder, placeholder_tokens, store_id),
             )
             if before_commit is not None:
@@ -779,14 +761,14 @@ class MessageStore:
         """Mark a message as pinned (protected from pruning)."""
         with self._write_lock:
             self._conn.execute(
-                "UPDATE messages SET pinned = 1 WHERE store_id = ?", (store_id,)
+                f"UPDATE {self._message_table} SET pinned = 1 WHERE store_id = ?", (store_id,)
             )
             self._conn.commit()
 
     def unpin(self, store_id: int) -> None:
         with self._write_lock:
             self._conn.execute(
-                "UPDATE messages SET pinned = 0 WHERE store_id = ?", (store_id,)
+                f"UPDATE {self._message_table} SET pinned = 0 WHERE store_id = ?", (store_id,)
             )
             self._conn.commit()
 
@@ -1201,7 +1183,7 @@ class MessageStore:
             blank_clause = _legacy_blank_source_clause("source")
             with self._conn:
                 cur = self._conn.execute(
-                    f"UPDATE messages SET source = ? WHERE {blank_clause}",
+                    f"UPDATE {self._message_table} SET source = ? WHERE {blank_clause}",
                     (_UNKNOWN_SOURCE,),
                 )
             updated = cur.rowcount if cur.rowcount is not None else 0

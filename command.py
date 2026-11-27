@@ -54,6 +54,7 @@ from .assertion_store import AssertionSchemaUnavailableError, AssertionStore
 from . import rollup_builder
 from .rollup_store import RollupStore
 from .session_patterns import build_session_match_keys, matches_session_pattern
+from .packed_archive import physical_messages
 from .store import build_message_fts_spec
 from .chunking import (
     VALID_CONTENT_POLICIES,
@@ -938,7 +939,7 @@ def _rotate_apply_with_slot(engine, write_snapshot, initial) -> str:
 def _scan_fts_repair(engine) -> dict[str, Any]:
     checks: dict[str, dict[str, Any]] = {}
     specs = {
-        "messages_fts": build_message_fts_spec(),
+        "messages_fts": build_message_fts_spec(engine._store.connection),
         "nodes_fts": build_nodes_fts_spec(),
     }
     conn = engine._store.connection
@@ -1020,7 +1021,7 @@ def _doctor_repair_apply_text(engine) -> str:
 
     conn = engine._store.connection
     try:
-        messages_result = repair_external_content_fts(conn, build_message_fts_spec())
+        messages_result = repair_external_content_fts(conn, build_message_fts_spec(conn))
         nodes_result = repair_external_content_fts(conn, build_nodes_fts_spec())
     except sqlite3.Error as exc:
         return "\n".join([
@@ -1339,7 +1340,7 @@ def _doctor_text(engine) -> str:
 
     try:
         store_fts_count = int(store_conn.execute("SELECT COUNT(*) FROM messages_fts").fetchone()[0])
-        store_fts_integrity = check_external_content_fts_integrity(store_conn, build_message_fts_spec())
+        store_fts_integrity = check_external_content_fts_integrity(store_conn, build_message_fts_spec(store_conn))
         store_fts = _fts_text_status(store_fts_integrity)
         if store_fts == "fail":
             issues.append("messages_fts")
@@ -1371,7 +1372,7 @@ def _doctor_text(engine) -> str:
     # could not confirm it (e.g. read-only access), pointing at the explicit
     # repair path.
     try:
-        store_fts_failed_flag = load_integrity_failed(store_conn, build_message_fts_spec())
+        store_fts_failed_flag = load_integrity_failed(store_conn, build_message_fts_spec(store_conn))
     except Exception:  # pragma: no cover - defensive
         store_fts_failed_flag = None
     try:
@@ -1908,10 +1909,11 @@ def _delete_clean_candidates_atomically(engine, session_ids: set[str]) -> dict[s
                 "WHERE scope.session_id = messages.session_id)"
             ).fetchall()
         ]
+        table = physical_messages(conn)
         msg_cur = conn.execute(
-            f"DELETE FROM messages WHERE EXISTS ("
+            f"DELETE FROM {table} WHERE EXISTS ("
             f"SELECT 1 FROM {scope_table} AS scope "
-            "WHERE scope.session_id = messages.session_id)"
+            f"WHERE scope.session_id = {table}.session_id)"
         )
         archive_chunks = getattr(engine, "_archive_chunks_for_messages", None)
         if callable(archive_chunks) and deleted_store_ids:

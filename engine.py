@@ -137,6 +137,7 @@ from .message_content import (
     text_content_for_pattern_matching,
 )
 from .sqlite_util import (
+    private_file_lock,
     _is_sqlite_locked_error,
     _temporary_sqlite_busy_timeout,
 )
@@ -481,6 +482,7 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         # The cursor is process-local; existing sessions rebound after a
         # gateway restart reconcile it against the durable store on the
         # next ingest.
+        self._ingest_head = 0
         self._ingest_cursor: int = 0
         self._ingest_cursor_needs_reconcile = False
         self._last_ingest_reconciliation: Dict[str, Any] = {
@@ -4221,7 +4223,8 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         if not self._session_id or self._session_ignored or self._session_stateless:
             return
         try:
-            self._ingest_cursor_needs_reconcile = self._store.get_session_count(self._session_id) > 0
+            self._ingest_head = self._store.session_head(self._session_id)
+            self._ingest_cursor_needs_reconcile = self._ingest_head > 0
         except Exception as exc:  # pragma: no cover - defensive only
             logger.debug("LCM ingest cursor reconciliation probe failed: %s", exc)
             self._ingest_cursor_needs_reconcile = False
@@ -4594,6 +4597,25 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         return redacted_replay_messages
 
     def _ingest_messages(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if not self._session_id or self._session_ignored or self._session_stateless:
+            return self._redact_active_replay_messages(messages)
+        # Serialize the read/reconcile/append decision across independent engines.
+        # A bounded set of lock files avoids one inode per historical session.
+        path = self._store.db_path
+        if str(path) == ":memory:":
+            lock = self._store._write_lock
+        else:
+            path = path.resolve()
+            stripe = hashlib.sha256(self._session_id.encode()).digest()[0] % 64
+            lock = private_file_lock(path.with_name(f"{path.name}.ingest-{stripe:02x}.lock"))
+        with lock:
+            head = self._store.session_head(self._session_id)
+            if head != self._ingest_head:
+                self._ingest_cursor_needs_reconcile = True
+            self._ingest_head = head
+            return self._ingest_locked(messages)
+
+    def _ingest_locked(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Persist new messages to the store.
 
         Uses a cursor to track which portion of the current messages list
@@ -4606,18 +4628,6 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
         assistant loops replaced by quarantine placeholders. Existing callers may
         ignore the return value when they only need durable persistence.
         """
-        if not self._session_id:
-            logger.debug("Ingest skipped: no session_id")
-            return self._redact_active_replay_messages(messages)
-
-        if self._session_ignored or self._session_stateless:
-            logger.debug(
-                "Ingest skipped for %s session %s",
-                "ignored" if self._session_ignored else "stateless",
-                self._session_id,
-            )
-            return self._redact_active_replay_messages(messages)
-
         n = len(messages)
         cursor = min(max(self._ingest_cursor, 0), n)
         scan_start = 0 if self._ingest_cursor_needs_reconcile else cursor
@@ -4992,13 +5002,14 @@ class LCMEngine(CompactionMixin, ResetStateMixin, ReconcileMixin, AuxiliarySessi
                 active_replay_messages[absolute_idx] = stubbed_message
 
         estimates = [count_message_tokens(m) for m in protected_messages]
-        self._store._append_protected_batch(
+        inserted_ids = self._store._append_protected_batch(
             self._session_id,
             protected_messages,
             estimates,
             source=self._session_platform,
             conversation_id=self._conversation_id,
         )
+        self._ingest_head = inserted_ids[-1]
         # Rollup staleness is driven by summary-node PUBLICATION
         # (_invalidate_rollups_for_published_node at every add_node site), not by
         # raw ingest: marking a period stale before its covering summary exists

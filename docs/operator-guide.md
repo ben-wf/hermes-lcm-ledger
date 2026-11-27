@@ -118,7 +118,7 @@ Typical output:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm-ledger v1.0.0 (15 tools)
+  ✓ hermes-lcm-ledger v1.1.0 (15 tools)
 
 Provider Plugins:
   Context Engine: lcm
@@ -1070,3 +1070,15 @@ Safety and reconciliation behavior:
 - [Benchmarking and stress checks](../benchmarks/README.md)
 - [Release validation](release-validation.md)
 - [Packaging and distribution posture](packaging.md)
+
+## Compact a Ledger archive
+
+Install Ledger 1.1 or later on every writer. Allow active turns to finish, then stop Hermes and every other process that can write the database. Use the database path reported by `lcm_status`. For a default profile, run this command from the plugin directory using Python 3.14.
+
+```sh
+python scripts/pack_archive.py ~/.hermes/lcm.db ~/.hermes/lcm-packed.db
+```
+
+The converter reads a consistent SQLite snapshot and creates a separate, owner-only file. Allow space for a working copy, its transaction journal and the compact result. It checks every message and summary, SQLite structure and full-text postings before publishing the output. If writers continue during the copy, later changes belong to the original. Take a fresh copy with all writers stopped before switching.
+
+Set the profile's Ledger database path to the verified output, start Hermes and check the version and path in `lcm_status`. Keep the original database and its SQLite sidecars together for rollback. A 1.0 installation requires the original archive. Switching back after new turns have been written requires preserving the newer archive and accounting for those turns.

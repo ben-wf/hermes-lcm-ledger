@@ -19,6 +19,7 @@ import time
 from contextlib import contextmanager
 from typing import Iterable, Sequence
 
+from .packed_archive import PACKED_VERSION, is_packed
 from .config import DEFAULT_INTEGRITY_CHECK_INTERVAL_HOURS as DEFAULT_INTEGRITY_CHECK_INTERVAL_HOURS
 
 logger = logging.getLogger(__name__)
@@ -261,7 +262,7 @@ def read_existing_schema_version(conn: sqlite3.Connection) -> int:
 def refuse_schema_version_too_new(conn: sqlite3.Connection) -> None:
     """Raise before any startup DDL when a newer build owns the DB."""
     current_version = read_existing_schema_version(conn)
-    if current_version <= SCHEMA_VERSION:
+    if current_version <= SCHEMA_VERSION or (current_version == PACKED_VERSION and is_packed(conn)):
         return
     if classify_version_mismatch(conn) == VERSION_MISMATCH_INTERIM_STAMP:
         raise SchemaVersionTooNewError(
@@ -660,7 +661,7 @@ def remediate_interim_schema_stamp(
         "drop_plan": [],
         "dropped_tables": [],
     }
-    if current_version <= SCHEMA_VERSION:
+    if current_version <= SCHEMA_VERSION or (current_version == PACKED_VERSION and is_packed(conn)):
         return result
     classification = classify_version_mismatch(conn)
     result["classification"] = classification
@@ -2435,7 +2436,7 @@ def inspect_lcm_schema_health(
             """
             SELECT name
             FROM sqlite_master
-            WHERE type='table'
+            WHERE type='table' OR (type='view' AND name='messages')
             ORDER BY name
             """
         ).fetchall()
